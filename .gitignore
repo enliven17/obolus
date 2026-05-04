@@ -1,0 +1,56 @@
+
+# Environment files
+.env
+.env.local
+**/.env
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build outputs
+dist/
+build/
+.next/
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+
+# Debug artifacts
+/tmp/stage2-debug-*.png
+*.png
+# ...but keep web app icons (Next.js file conventions)
+!web/app/icon.png
+!web/app/apple-icon.png
+
+# Test coverage
+sdk/coverage/
+
+# Playwright test artifacts
+web/test-results/
+web/playwright-report/
+
+# Rust build artifacts
+contract/target/
+**/target/
+
+# OS files
+.DS_Store
+**/.DS_Store
+
+# Claude local state
+.claude/
+
+# Audit artifacts
+docs/audits/
+
+# Old audit files (rolled into docs/audits/)
+audit-fixes.md
+claude-audit.md
+codex-audit.md
+
+# OWS tarball (local build artifact)
+sdk/open-wallet-standard-core-*.tgz
+web/.env.production
