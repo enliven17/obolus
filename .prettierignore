@@ -1,0 +1,11 @@
+node_modules
+dist
+build
+.next
+*.lock
+contract/target
+sdk/coverage
+web/test-results
+web/playwright-report
+contract/api/*.d.ts
+web/next-env.d.ts
