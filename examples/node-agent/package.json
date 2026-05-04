@@ -1,0 +1,11 @@
+{
+  "name": "obolus-node-agent-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "dependencies": {
+    "obolus": "^0.1.0"
+  }
+}
