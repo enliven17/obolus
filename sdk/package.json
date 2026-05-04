@@ -1,0 +1,81 @@
+{
+  "name": "obolus",
+  "version": "0.4.7",
+  "description": "Virtual Visa cards for AI agents — pay USDC or SOL on Solana, get a card in ~60s",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp.d.ts",
+      "import": "./dist/mcp.js",
+      "require": "./dist/mcp.js"
+    }
+  },
+  "bin": {
+    "obolus": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint": "eslint src",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "keywords": [
+    "solana",
+    "usdc",
+    "sol",
+    "virtual-card",
+    "vcc",
+    "visa",
+    "ai-agent",
+    "mcp",
+    "model-context-protocol",
+    "402-payment",
+    "soroban",
+    "obolus"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/enliven/obolus"
+  },
+  "homepage": "https://obolus.com",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "overrides": {
+    "axios": "^1.15.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@obolus/solana-ows-core": "^1.3.0-solana",
+    "@solana/web3.js": "^15.0.1"
+  },
+  "optionalDependencies": {
+    "@obolus/solana-ows-core-linux-x64-gnu": "1.3.0-solana",
+    "@obolus/solana-ows-core-linux-arm64-gnu": "1.3.0-solana",
+    "@obolus/solana-ows-core-darwin-x64": "1.3.0-solana",
+    "@obolus/solana-ows-core-darwin-arm64": "1.3.0-solana"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^4.1.3",
+    "typescript": "^5.0.0",
+    "vitest": "^4.1.3"
+  }
+}
