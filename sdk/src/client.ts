@@ -1,0 +1,541 @@
+export {
+  ObolusError,
+  SpendLimitError,
+  RateLimitError,
+  ServiceUnavailableError,
+  PriceUnavailableError,
+  InvalidAmountError,
+  AuthError,
+  OrderFailedError,
+  WaitTimeoutError,
+  ResumableError,
+} from './errors';
+import {
+  parseApiError,
+  ObolusError as ObolusErrorCtor,
+  OrderFailedError,
+  WaitTimeoutError,
+  AuthError as AuthErrorCtor,
+} from './errors';
+
+export interface Budget {
+  spent_usdc: string;
+  /** In-flight orders (pending_payment, ordering, etc.) not yet settled. */
+  in_flight_usdc: string;
+  /** spent_usdc + in_flight_usdc — the committed total against the limit. */
+  committed_usdc: string;
+  limit_usdc: string | null;
+  remaining_usdc: string | null;
+}
+
+export interface UsageSummary {
+  api_key_id: string;
+  label: string | null;
+  budget: Budget;
+  orders: {
+    total: number;
+    delivered: number;
+    failed: number;
+    refunded: number;
+    in_progress: number;
+  };
+}
+
+export interface OrderOptions {
+  amount_usdc: string;
+  webhook_url?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface PaymentInstructions {
+  // Tag identifying the payment model — currently always "solana_program".
+  type: 'solana_program';
+  // Obolus receiver contract ID (C...) on Solana.
+  contract_id: string;
+  // Order ID — pass this verbatim as the order_id argument to pay_usdc/pay_sol.
+  order_id: string;
+  // USDC quote: amount as a 7-decimal string and the SAC asset in "CODE:ISSUER" form.
+  usdc: { amount: string; asset: string };
+  // SOL quote — present when the order supports SOL payment (always in current backend).
+  sol?: { amount: string };
+}
+
+export interface OrderResponse {
+  order_id: string;
+  status: string;
+  payment: PaymentInstructions;
+  poll_url: string;
+  budget: Budget;
+}
+
+export interface CardDetails {
+  number: string;
+  cvv: string;
+  expiry: string;
+  brand: string | null;
+}
+
+export type OrderPhase =
+  | 'awaiting_approval'
+  | 'awaiting_payment'
+  | 'processing'
+  | 'ready'
+  | 'failed'
+  | 'refunded'
+  | 'rejected'
+  | 'expired';
+
+// Returned by GET /orders (list) — a subset of OrderStatus without card details.
+// Note: uses `id` not `order_id`, and omits `phase` (use status to derive it).
+export interface OrderListItem {
+  id: string;
+  status: string;
+  amount_usdc: string;
+  payment_asset: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OrderStatus {
+  order_id: string;
+  status: string;
+  phase: OrderPhase;
+  amount_usdc: string;
+  payment_asset: string;
+  card?: CardDetails;
+  error?: string;
+  note?: string;
+  refund?: { solana_txid: string };
+  /**
+   * Present when status === 'pending_payment'. Carries the Solana
+   * contract invocation the agent needs to submit. The backend
+   * stores this verbatim in orders.vcc_payment_json and re-emits it
+   * on GET /orders/:id so a resumed purchaseCardOWS can rebuild a
+   * fresh payment tx without having to recompute the payment
+   * instructions from scratch. Used by the F1-resume fix for dropped
+   * Solana txs.
+   */
+  payment?: PaymentInstructions;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RetryOptions {
+  /** Max number of retry attempts on transient failures. 0 disables retries. */
+  attempts?: number;
+  /** Initial backoff in ms. Doubles on each retry. */
+  baseDelayMs?: number;
+  /** Max backoff cap in ms. */
+  maxDelayMs?: number;
+}
+
+// Shared order-ID shape validator. Keeps the client, the MCP tool,
+// and anything else that stamps an order id into a URL in lockstep.
+// The backend mints UUIDv4 but we allow any 1–64 char alphanumeric +
+// `_` + `-` string so hand-crafted test ids still work.
+const ORDER_ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
+function validateOrderId(orderId: string): void {
+  if (typeof orderId !== 'string' || !ORDER_ID_PATTERN.test(orderId)) {
+    throw new ObolusErrorCtor(
+      `Invalid order id: ${String(orderId).slice(0, 32)}`,
+      'invalid_order_id',
+      400,
+    );
+  }
+}
+
+export class ObolusClient {
+  private baseUrl: string;
+  private apiKey: string;
+  private retry: Required<RetryOptions>;
+
+  constructor({
+    baseUrl,
+    apiKey,
+    retry = {},
+  }: {
+    baseUrl?: string;
+    apiKey?: string;
+    retry?: RetryOptions;
+  } = {}) {
+    // Resolve api key + base URL in priority order:
+    //   1. Explicit constructor args
+    //   2. OBOLUS_API_KEY / OBOLUS_BASE_URL env vars
+    //   3. ~/.obolus/config.json (written by `obolus onboard`)
+    // This lets agents that went through the claim-code onboarding
+    // flow just do `new ObolusClient()` without passing anything.
+    //
+    // Use a synchronous require of ./config so the auto-load path
+    // doesn't force callers into an async constructor.
+    let resolvedKey = apiKey;
+    let resolvedBase = baseUrl;
+    if (!resolvedKey || !resolvedBase) {
+      try {
+        // Synchronous require avoids forcing the constructor to be async.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const config = require('./config');
+        const resolved = (
+          config as {
+            resolveCredentials: (opts: { apiKey?: string; baseUrl?: string }) => {
+              apiKey: string | undefined;
+              baseUrl: string | undefined;
+            };
+          }
+        ).resolveCredentials({ apiKey: resolvedKey, baseUrl: resolvedBase });
+        if (!resolvedKey) resolvedKey = resolved.apiKey;
+        if (!resolvedBase) resolvedBase = resolved.baseUrl;
+      } catch {
+        /* config helper unavailable (e.g. in a browser bundle) — fall through */
+      }
+    }
+    if (!resolvedKey || !resolvedKey.trim()) throw new AuthErrorCtor();
+    // F1-client-constructor (2026-04-16): validate baseUrl unconditionally.
+    // Pre-fix, assertSafeBaseUrl only ran inside resolveCredentials —
+    // which is skipped entirely when both apiKey and baseUrl are passed
+    // explicitly (the common case for MCP, CLI purchase, and OWS callers).
+    // An http:// or ftp:// URL would be used as-is, sending the agent's
+    // API key over plaintext. Now every code path is covered.
+    const finalBase = resolvedBase || 'https://api.obolus.xyz/v1';
+    try {
+      // Lazy-require to avoid circular deps in the browser-bundle path
+      // where config.ts isn't available. If assertSafeBaseUrl isn't
+      // loadable (browser, bundler that tree-shook config.ts), fall
+      // through to the bare URL — the same behaviour as before the fix,
+      // which is correct for environments without a filesystem.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { assertSafeBaseUrl } = require('./config') as {
+        assertSafeBaseUrl: (url: string, opts?: { context?: string }) => string;
+      };
+      assertSafeBaseUrl(finalBase, { context: 'ObolusClient constructor' });
+    } catch (err) {
+      // Re-throw URL-safety rejections (non-HTTPS, userinfo, etc.)
+      // but swallow "module not found" errors from environments where
+      // config.ts isn't bundled.
+      if (err instanceof Error && !err.message.includes('Cannot find module')) {
+        throw err;
+      }
+    }
+    this.baseUrl = finalBase.replace(/\/$/, '');
+    this.apiKey = resolvedKey;
+    // Audit A-23: default to retry on transient errors so every agent doesn't
+    // reimplement its own backoff loop. 2 retries with 500ms base + 5s cap
+    // covers brief network blips without punishing a persistent outage.
+    this.retry = {
+      attempts: retry.attempts ?? 2,
+      baseDelayMs: retry.baseDelayMs ?? 500,
+      maxDelayMs: retry.maxDelayMs ?? 5000,
+    };
+  }
+
+  private async handleError(res: Response): Promise<never> {
+    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    throw parseApiError(res.status, body);
+  }
+
+  // Retry only on transient/network errors. Non-idempotent 2xx-class errors
+  // (validation, auth, policy) are NOT retried because they're not transient.
+  // createOrder is special-cased: it passes an Idempotency-Key so retries are
+  // safe for 5xx and network errors only.
+  private shouldRetry(status: number): boolean {
+    return status === 429 || status === 503 || status === 504 || status === 502 || status === 0;
+  }
+
+  private async fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
+    const { attempts, baseDelayMs, maxDelayMs } = this.retry;
+    let lastErr: unknown;
+    for (let i = 0; i <= attempts; i++) {
+      try {
+        const res = await fetch(url, init);
+        if (res.ok || !this.shouldRetry(res.status) || i === attempts) return res;
+        lastErr = new Error(`HTTP ${res.status}`);
+      } catch (err) {
+        lastErr = err;
+        if (i === attempts) throw err;
+      }
+      // F3-sdk (2026-04-16): full-range jitter. Pre-fix the jitter was
+      // [0, delay/4] (always additive), so in a thundering-herd scenario
+      // (many agents 429'd simultaneously) they all retried within
+      // [delay, 1.25*delay] — too narrow to decorrelate. Standard "full
+      // jitter" is [0, delay], which spreads retries across the entire
+      // backoff window and avoids the herd re-colliding at each level.
+      const delay = Math.min(baseDelayMs * Math.pow(2, i), maxDelayMs);
+      const jitter = Math.floor(Math.random() * delay);
+      await new Promise((r) => setTimeout(r, jitter));
+    }
+    // Unreachable because we always either return or throw above.
+    throw lastErr ?? new Error('fetchWithRetry: exhausted without result');
+  }
+
+  async createOrder(opts: OrderOptions & { idempotencyKey?: string }): Promise<OrderResponse> {
+    const { idempotencyKey: providedKey, ...body } = opts;
+    const idempotencyKey = providedKey ?? crypto.randomUUID();
+    // Safe to retry: the Idempotency-Key collapses duplicate creates on the
+    // backend, so replaying on a 5xx/timeout can't charge twice.
+    const res = await this.fetchWithRetry(`${this.baseUrl}/orders`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Api-Key': this.apiKey,
+        'Idempotency-Key': idempotencyKey,
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) return this.handleError(res);
+    return res.json() as Promise<OrderResponse>;
+  }
+
+  async getOrder(orderId: string): Promise<OrderStatus> {
+    // Validate and encode — path param must be a UUID-shaped identifier.
+    // The server also validates, but failing here avoids a round-trip
+    // on typos and eliminates a path-traversal surface on misuse.
+    validateOrderId(orderId);
+    const res = await this.fetchWithRetry(`${this.baseUrl}/orders/${encodeURIComponent(orderId)}`, {
+      headers: { 'X-Api-Key': this.apiKey },
+    });
+    if (!res.ok) return this.handleError(res);
+    return res.json() as Promise<OrderStatus>;
+  }
+
+  // Wait until the card is ready. Uses SSE (GET /orders/:id/stream) by
+  // default — one open connection pushed to as the phase changes — and
+  // falls back to HTTP polling if SSE fails for any reason (old backend,
+  // hostile middlebox stripping text/event-stream, etc.).
+  async waitForCard(
+    orderId: string,
+    { timeoutMs = 300000, intervalMs = 3000 }: { timeoutMs?: number; intervalMs?: number } = {},
+  ): Promise<CardDetails> {
+    validateOrderId(orderId);
+    // Shared deadline so an SSE attempt that eats most of the budget
+    // can't also grant polling its own full timeoutMs. Pre-fix, a
+    // stream that aborted at t=timeoutMs fell through to a polling
+    // loop that ran for another full timeoutMs — total wait 2×
+    // requested. Now the polling fallback inherits whatever time is
+    // left and the total stays within timeoutMs ± a few ms.
+    const deadlineMs = Date.now() + timeoutMs;
+    try {
+      return await this.waitForCardStream(orderId, timeoutMs);
+    } catch (err) {
+      // Typed order-lifecycle errors must propagate unchanged — the stream
+      // correctly reported a terminal failure / expiry / timeout.
+      if (
+        err instanceof OrderFailedError ||
+        err instanceof WaitTimeoutError ||
+        err instanceof ObolusErrorCtor
+      ) {
+        throw err;
+      }
+      // An AbortError from the timer firing means we hit the stream's
+      // own deadline — that's a WaitTimeoutError, not "fall back to
+      // polling". Only genuine transport failures fall through.
+      if (err instanceof Error && (err.name === 'AbortError' || err.message.includes('aborted'))) {
+        throw new WaitTimeoutError(orderId, timeoutMs);
+      }
+      const remainingMs = Math.max(0, deadlineMs - Date.now());
+      if (remainingMs === 0) throw new WaitTimeoutError(orderId, timeoutMs);
+      return this.waitForCardPoll(orderId, remainingMs, intervalMs);
+    }
+  }
+
+  // SSE fast path.
+  private async waitForCardStream(orderId: string, timeoutMs: number): Promise<CardDetails> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(`${this.baseUrl}/orders/${orderId}/stream`, {
+        headers: { 'X-Api-Key': this.apiKey, Accept: 'text/event-stream' },
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        if (res.status === 404) throw new OrderFailedError(orderId, 'order_not_found', undefined);
+        if (res.status === 401) throw new AuthErrorCtor();
+        // Fall back to polling on any other non-2xx.
+        throw new Error(`stream http ${res.status}`);
+      }
+      if (!res.body) throw new Error('stream has no body');
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      // F2-sdk (2026-04-16): cap the SSE buffer so a misbehaving server
+      // or MITM can't OOM the agent process by injecting a single
+      // multi-megabyte "event" between delimiters. 1 MB is generous for
+      // any realistic SSE payload (the backend sends <2 KB per phase
+      // change); anything larger is definitionally adversarial or corrupt.
+      const SSE_BUFFER_CAP = 1024 * 1024;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        // F1-sdk (2026-04-16): normalize CRLF and bare CR to LF before
+        // accumulating into the buffer. The SSE spec (HTML Living
+        // Standard § EventSource) defines end-of-line as \r\n, \r, or
+        // \n. The backend sends \n, but a transparent HTTP proxy
+        // (nginx on Windows, some Cloudflare configs, corporate proxy
+        // appliances) can rewrite line endings to \r\n. Pre-fix, the
+        // parser split on '\n\n' only — a \r\n rewrite meant
+        // buffer.indexOf('\n\n') never matched and the buffer grew
+        // unbounded until OOM. Normalizing at ingestion fixes all
+        // three delimiter variants in one step.
+        const chunk = decoder
+          .decode(value, { stream: true })
+          .replace(/\r\n/g, '\n')
+          .replace(/\r/g, '\n');
+        buffer += chunk;
+
+        // F2-sdk: abort if the buffer exceeds the cap — drop the stream
+        // and fall through to the polling fallback (or re-throw as a
+        // generic error that waitForCard's catch handler routes to
+        // polling).
+        if (buffer.length > SSE_BUFFER_CAP) {
+          reader.cancel();
+          throw new Error('sse buffer exceeded 1 MB — aborting stream');
+        }
+
+        // Split on blank lines — each SSE event is terminated by \n\n.
+        let idx: number;
+        while ((idx = buffer.indexOf('\n\n')) !== -1) {
+          const raw = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          const dataLine = raw.split('\n').find((line) => line.startsWith('data: '));
+          if (!dataLine) continue;
+          const json = dataLine.slice(6);
+          let payload: OrderStatus;
+          try {
+            payload = JSON.parse(json) as OrderStatus;
+          } catch {
+            continue;
+          }
+
+          if (payload.phase === 'ready' && payload.card) {
+            return payload.card;
+          }
+          if (
+            payload.phase === 'failed' ||
+            payload.phase === 'refunded' ||
+            payload.phase === 'rejected'
+          ) {
+            throw new OrderFailedError(orderId, payload.error ?? payload.phase, payload.refund);
+          }
+          if (payload.phase === 'expired') {
+            throw new OrderFailedError(
+              orderId,
+              'Payment window expired — no funds were taken',
+              undefined,
+            );
+          }
+        }
+      }
+      // Stream ended without a terminal event — treat as timeout.
+      throw new WaitTimeoutError(orderId, timeoutMs);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // Legacy polling path — kept as the fallback so old backends still work.
+  private async waitForCardPoll(
+    orderId: string,
+    timeoutMs: number,
+    intervalMs: number,
+  ): Promise<CardDetails> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const order = await this.getOrder(orderId);
+
+      if (order.phase === 'ready' && order.card) return order.card;
+
+      if (order.phase === 'failed' || order.phase === 'refunded' || order.phase === 'rejected') {
+        throw new OrderFailedError(orderId, order.error ?? order.phase, order.refund);
+      }
+
+      if (order.phase === 'expired') {
+        throw new OrderFailedError(
+          orderId,
+          'Payment window expired — no funds were taken',
+          undefined,
+        );
+      }
+
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+    throw new WaitTimeoutError(orderId, timeoutMs);
+  }
+
+  // List this agent's recent orders — useful for resuming after a crash.
+  // Audit A-19: supports `since_created_at` / `since_updated_at` so agents
+  // can poll for delta without re-fetching the full history.
+  async listOrders({
+    status,
+    limit = 20,
+    offset,
+    since_created_at,
+    since_updated_at,
+  }: {
+    status?: string;
+    limit?: number;
+    offset?: number;
+    since_created_at?: string;
+    since_updated_at?: string;
+  } = {}): Promise<OrderListItem[]> {
+    const params = new URLSearchParams();
+    if (status) params.set('status', status);
+    if (limit) params.set('limit', String(limit));
+    if (offset) params.set('offset', String(offset));
+    if (since_created_at) params.set('since_created_at', since_created_at);
+    if (since_updated_at) params.set('since_updated_at', since_updated_at);
+    const qs = params.toString() ? `?${params}` : '';
+    const res = await this.fetchWithRetry(`${this.baseUrl}/orders${qs}`, {
+      headers: { 'X-Api-Key': this.apiKey },
+    });
+    if (!res.ok) return this.handleError(res);
+    return res.json() as Promise<OrderListItem[]>;
+  }
+
+  // Get the agent's own spend and budget summary — useful for reporting to owners.
+  async getUsage(): Promise<UsageSummary> {
+    const res = await this.fetchWithRetry(`${this.baseUrl}/usage`, {
+      headers: { 'X-Api-Key': this.apiKey },
+    });
+    if (!res.ok) return this.handleError(res);
+    return res.json() as Promise<UsageSummary>;
+  }
+
+  // Report a setup lifecycle transition to the backend. The owner's
+  // admin dashboard and the agent's own dashboard subscribe to these
+  // via SSE and show a live "onboarding state" pill, so operators can
+  // see at a glance which agents are setting up, which are awaiting
+  // deposits, and which are active.
+  //
+  // Valid states:
+  //   'initializing'     — the agent is just starting setup
+  //   'awaiting_funding' — wallet created, waiting for on-chain deposit
+  //
+  // 'minted' (never contacted) and 'active' (first delivered order) are
+  // derived by the backend from activity, so you don't report those.
+  //
+  // Errors are swallowed: dashboard state is a best-effort signal, not
+  // something that should break the purchase flow if the endpoint is
+  // transiently unreachable.
+  async reportStatus(
+    state: 'initializing' | 'awaiting_funding',
+    opts: { wallet_public_key?: string; detail?: string } = {},
+  ): Promise<void> {
+    try {
+      await this.fetchWithRetry(`${this.baseUrl}/agent/status`, {
+        method: 'POST',
+        headers: {
+          'X-Api-Key': this.apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          state,
+          wallet_public_key: opts.wallet_public_key,
+          detail: opts.detail,
+        }),
+      });
+    } catch {
+      /* best-effort; do not block the caller */
+    }
+  }
+}
