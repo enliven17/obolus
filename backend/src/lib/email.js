@@ -1,0 +1,429 @@
+// @ts-check
+// Email sender — thin wrapper around nodemailer using SMTP.
+// Works with any SMTP provider: Resend, SES (via SMTP endpoint), etc.
+// Transporter is created lazily so the module can be imported in test environments
+// without SMTP credentials configured.
+//
+// Visual language (aligned with the Obolus brand refresh):
+//   - Darker canvas (#050505) and softer borders so the emails read
+//     engineering-grade rather than marketing-flashy
+//   - Obolus wordmark pulled from https://obolus.com/logo.svg with a
+//     serif text fallback for Outlook (which strips SVG)
+//   - Muted green accent (#7cffb2) matching the dashboard + landing
+//   - Georgia-first serif stack for headlines so editorial character
+//     survives even where no custom fonts load; Fraunces would be
+//     better but email clients strip @font-face reliably
+//   - Table-based layout for maximum client compatibility. Explicit
+//     background + text colors on every cell so Gmail/Outlook
+//     dark-mode auto-invert leaves the dark palette alone.
+
+const nodemailer = require('nodemailer');
+
+let _transporter;
+
+// Adversarial audit F2-email (2026-04-15): bounded SMTP timeouts.
+// nodemailer's defaults for connectionTimeout/greetingTimeout/
+// socketTimeout are each 10 minutes. If the SMTP provider hangs,
+// sendLoginCode (called inline from POST /auth/login before the
+// HTTP response flushes) would block the user-facing request for
+// up to ~30 minutes before Node's TCP defaults kicked in. The
+// caller's timeout wrappers can't help because createTransport
+// doesn't propagate them. Cap each phase so a dead SMTP server
+// surfaces within ~15s.
+const SMTP_CONNECTION_TIMEOUT_MS = 10_000;
+const SMTP_GREETING_TIMEOUT_MS = 10_000;
+const SMTP_SOCKET_TIMEOUT_MS = 15_000;
+
+function getTransporter() {
+  if (!_transporter) {
+    _transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: parseInt(process.env.SMTP_PORT || '587', 10),
+      secure: process.env.SMTP_PORT === '465',
+      requireTLS: process.env.SMTP_PORT !== '465',
+      connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
+      greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
+      socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      },
+    });
+  }
+  return _transporter;
+}
+
+// Adversarial audit F1-email (2026-04-15): sanitize any value that
+// flows into an SMTP header (primarily the `subject:` field). The
+// call sites interpolate operator-controlled strings like
+// `api_key.label` and `alert_rules.name` into subject templates.
+// Nodemailer is SUPPOSED to strip newlines from header values, but
+// relying on upstream defense when the fix costs two lines at the
+// interpolation site is weak. An operator who set a label like
+//     "Evil\r\nBcc: attacker@evil.com"
+// could otherwise inject a BCC header and exfiltrate transactional
+// email content to an arbitrary address. The attack surface is
+// narrow (self-attack by a dashboard owner on their own
+// transactional mail), but header injection is a primitive that
+// should never reach nodemailer regardless of the threat model.
+//
+// Strip CR, LF, and all C0 control characters. Also cap at 200
+// chars because subject lines longer than that are either a caller
+// bug or hostile. Callers that need more space should use the body.
+function sanitizeHeader(value) {
+  if (value === null || value === undefined) return '';
+  const str = String(value);
+  return str.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 200);
+}
+
+// Wrap sendMail so a rejected-recipient result surfaces as a throw.
+// Nodemailer's sendMail resolves successfully even if the SMTP
+// server rejected one or more recipients — the rejection info lands
+// in `info.rejected`. Callers that await sendMail without checking
+// the result would believe the email was delivered when it wasn't.
+// Adversarial audit F3-email.
+async function sendMailStrict(transporter, options) {
+  const info = await transporter.sendMail(options);
+  if (info && Array.isArray(info.rejected) && info.rejected.length > 0) {
+    throw new Error(
+      `SMTP rejected ${info.rejected.length} recipient(s): ${info.rejected.join(', ')}`,
+    );
+  }
+  return info;
+}
+
+// Wrap the bare address in SMTP_FROM with a display name so inboxes show
+// "Obolus" rather than the raw no-reply address. If the operator already
+// set a display name in SMTP_FROM (e.g. "foo <bar@baz.com>"), keep it.
+function from() {
+  const raw = process.env.SMTP_FROM || '';
+  if (raw.includes('<')) return raw;
+  return `"Obolus" <${raw}>`;
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// ── Design tokens ─────────────────────────────────────────────────────────────
+
+const COLOR = {
+  bg: '#050505',
+  card: '#0c0c0c',
+  inner: '#0a0a0a',
+  border: '#1a1a1a',
+  borderStrong: '#262626',
+  text: '#f4f4f4',
+  muted: '#a1a1a1',
+  faint: '#6b6b6b',
+  // Muted mint — matches the --green token in the new design system.
+  green: '#7cffb2',
+  greenInk: '#0a1a10', // dark foreground for use on the green CTA button
+  orange: '#ffb57a',
+};
+
+// System sans for body copy — widely available, consistent weights.
+const FONT_SANS =
+  "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif";
+// Serif for headlines. Georgia is installed on every major platform so
+// the editorial character survives even when custom fonts are stripped.
+const FONT_SERIF = "Georgia,'Times New Roman',Times,serif";
+const FONT_MONO = "ui-monospace,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace";
+
+// Email clients render the SVG raw (no CSS mask), so we serve a pre-tinted
+// light variant. The web app uses /logo.svg as a mask-image (colour from
+// currentColor), so we can't re-use it here — on a dark email background
+// it comes out invisible black.
+const LOGO_URL = 'https://obolus.com/logo-light.svg';
+// Public URL for the dashboard CTAs. All transactional emails deep-link
+// into the authenticated dashboard since operators need a session
+// regardless of email content.
+const DASHBOARD_URL = 'https://obolus.com/dashboard';
+
+// ── Shared chrome ─────────────────────────────────────────────────────────────
+
+// The header renders the Obolus wordmark as an SVG <img> with a
+// serif text fallback inside the alt attribute. Most modern clients
+// (Gmail web + mobile, Apple Mail, iOS Mail) load the SVG; Outlook
+// shows the alt text styled via inline CSS so it degrades to a
+// readable "Obolus" in serif.
+function header() {
+  return `
+    <tr>
+      <td style="padding:32px 36px 0 36px;">
+        <a href="https://obolus.com" style="text-decoration:none;color:${COLOR.text};" aria-label="Obolus">
+          <img
+            src="${LOGO_URL}"
+            width="120"
+            height="28"
+            alt="Obolus"
+            style="display:block;border:0;outline:none;text-decoration:none;height:28px;width:120px;max-width:120px;font-family:${FONT_SERIF};font-style:italic;font-size:22px;font-weight:600;color:${COLOR.text};letter-spacing:-0.01em;"
+          />
+        </a>
+      </td>
+    </tr>
+  `;
+}
+
+function wrap(preheader, body) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<meta name="supported-color-schemes" content="dark light">
+<title>Obolus</title>
+</head>
+<body style="margin:0;padding:0;background-color:${COLOR.bg};">
+<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;line-height:1px;color:${COLOR.bg};opacity:0;">${escapeHtml(preheader)}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:${COLOR.bg};">
+  <tr>
+    <td align="center" style="padding:48px 16px;">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background-color:${COLOR.card};border:1px solid ${COLOR.border};border-radius:14px;">
+        ${header()}
+        <tr>
+          <td style="padding:24px 36px 36px 36px;font-family:${FONT_SANS};color:${COLOR.text};font-size:15px;line-height:1.65;">
+            ${body}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:20px 36px;border-top:1px solid ${COLOR.border};font-family:${FONT_SANS};font-size:12px;color:${COLOR.faint};">
+            <a href="https://obolus.com" style="color:${COLOR.faint};text-decoration:none;">obolus.com</a>
+            &nbsp;·&nbsp;
+            Transactional only — we don't send marketing.
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+</body>
+</html>`;
+}
+
+// Shared button treatment — black ink on the muted green from the
+// dashboard. Table-wrapped for Outlook; inline-block display on the
+// anchor so padding renders in Gmail.
+function button(href, label) {
+  return `
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+      <tr>
+        <td style="background-color:${COLOR.green};border-radius:999px;">
+          <a href="${href}" style="display:inline-block;padding:13px 26px;color:${COLOR.greenInk};font-family:${FONT_SANS};font-weight:600;font-size:14px;text-decoration:none;letter-spacing:-0.005em;">
+            ${label}&nbsp;<span style="font-family:${FONT_MONO};font-weight:400;">↗</span>
+          </a>
+        </td>
+      </tr>
+    </table>
+  `;
+}
+
+// Display headline — serif, tight leading, matches the landing page
+// editorial voice.
+function headline(text) {
+  return `
+    <h1 style="margin:0 0 10px 0;font-family:${FONT_SERIF};font-size:26px;font-weight:500;color:${COLOR.text};letter-spacing:-0.015em;line-height:1.15;">
+      ${text}
+    </h1>
+  `;
+}
+
+function eyebrow(text) {
+  return `
+    <div style="font-family:${FONT_MONO};font-size:11px;font-weight:500;letter-spacing:0.14em;color:${COLOR.green};text-transform:uppercase;margin-bottom:14px;">
+      ${text}
+    </div>
+  `;
+}
+
+// ── Templates ─────────────────────────────────────────────────────────────────
+
+async function sendLoginCode(email, code) {
+  const safeCode = escapeHtml(code);
+  const body = `
+    ${eyebrow('Sign in')}
+    ${headline('Your Obolus login code')}
+    <p style="margin:0 0 26px 0;color:${COLOR.muted};font-size:14px;">Enter this code to finish signing in to your operator dashboard.</p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+      <tr>
+        <td align="center" style="padding:28px 0;background-color:${COLOR.inner};border:1px solid ${COLOR.borderStrong};border-radius:12px;">
+          <span style="font-family:${FONT_MONO};font-size:36px;letter-spacing:0.35em;font-weight:600;color:${COLOR.text};">${safeCode}</span>
+        </td>
+      </tr>
+    </table>
+    <p style="margin:24px 0 0 0;color:${COLOR.faint};font-size:13px;line-height:1.55;">This code expires in 15 minutes. If you didn't request it, you can safely ignore this email — nobody is waiting on the other end.</p>
+  `;
+  // Subject AND preheader are deliberately code-less. Both surfaces
+  // appear in upstream-visible places — provider logs, compliance
+  // archives, spam-classification pipelines, and the email client
+  // sidebar — long after the code has been used and invalidated.
+  // Keeping the code in the HTML/text body ONLY shrinks the
+  // accidental-exposure surface. A previous version of this file
+  // claimed the preheader carried the code; the actual behaviour
+  // was already code-free and that's the security-correct choice.
+  // Adversarial audit F2-email.
+  // Subject is a constant — no interpolation means no header-injection
+  // vector here. Still routed through sendMailStrict to surface any
+  // per-recipient rejection instead of silently succeeding.
+  const subject = 'Your Obolus login code';
+  await sendMailStrict(getTransporter(), {
+    from: from(),
+    to: email,
+    subject,
+    text: [
+      `Your Obolus login code:`,
+      ``,
+      `    ${code}`,
+      ``,
+      `Expires in 15 minutes. If you didn't request it, you can ignore this email.`,
+      ``,
+      `— obolus.com`,
+    ].join('\n'),
+    html: wrap(subject, body),
+  });
+}
+
+async function sendApprovalEmail(
+  ownerEmail,
+  { approvalId, orderId, amountUsdc, keyLabel, reason },
+) {
+  const body = `
+    ${eyebrow('Approval required')}
+    ${headline('An agent is waiting on you')}
+    <p style="margin:0 0 24px 0;color:${COLOR.muted};font-size:14px;">One of your agents hit a policy gate and is holding on your decision.</p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:${COLOR.inner};border:1px solid ${COLOR.borderStrong};border-radius:12px;margin-bottom:28px;">
+      <tr>
+        <td style="padding:22px 24px;font-family:${FONT_SANS};font-size:13px;">
+          <div style="color:${COLOR.faint};font-size:11px;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:6px;">Amount</div>
+          <div style="color:${COLOR.text};font-family:${FONT_SERIF};font-size:30px;font-weight:500;letter-spacing:-0.015em;margin-bottom:20px;">$${escapeHtml(amountUsdc)} <span style="color:${COLOR.faint};font-size:14px;font-family:${FONT_MONO};font-weight:400;letter-spacing:0.04em;">USDC</span></div>
+
+          <div style="color:${COLOR.faint};font-size:11px;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:6px;">Agent</div>
+          <div style="color:${COLOR.text};font-size:14px;margin-bottom:16px;">${escapeHtml(keyLabel)}</div>
+
+          <div style="color:${COLOR.faint};font-size:11px;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:6px;">Reason</div>
+          <div style="color:${COLOR.text};font-size:14px;margin-bottom:16px;">${escapeHtml(reason)}</div>
+
+          <div style="color:${COLOR.faint};font-size:11px;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:6px;">Order</div>
+          <div style="font-family:${FONT_MONO};color:${COLOR.muted};font-size:12px;">${escapeHtml(orderId)}</div>
+        </td>
+      </tr>
+    </table>
+    ${button(DASHBOARD_URL, 'Review in dashboard')}
+    <p style="margin:26px 0 0 0;color:${COLOR.faint};font-size:13px;">This request expires in 2 hours. Approval ID: <span style="font-family:${FONT_MONO};">${escapeHtml(approvalId)}</span></p>
+  `;
+  // F1-email: sanitize any operator-controlled value before it
+  // lands in SMTP headers. amountUsdc comes from the validated
+  // orders.amount_usdc column (digit-string only) so it's already
+  // safe, but pipe it through sanitizeHeader uniformly so future
+  // refactors don't re-open the surface.
+  const safeSubject = `Obolus — approval required for $${sanitizeHeader(amountUsdc)} USDC`;
+  await sendMailStrict(getTransporter(), {
+    from: from(),
+    to: ownerEmail,
+    subject: safeSubject,
+    text: [
+      `An agent is requesting approval for a $${amountUsdc} USDC transaction.`,
+      ``,
+      `Agent:    ${keyLabel}`,
+      `Amount:   $${amountUsdc} USDC`,
+      `Reason:   ${reason}`,
+      `Order:    ${orderId}`,
+      `Approval: ${approvalId}`,
+      ``,
+      `Review in dashboard: ${DASHBOARD_URL}`,
+      `Expires in 2 hours.`,
+      ``,
+      `— obolus.com`,
+    ].join('\n'),
+    html: wrap(`An agent needs approval for $${sanitizeHeader(amountUsdc)} USDC`, body),
+  });
+}
+
+async function sendSpendAlertEmail(ownerEmail, { keyLabel, pct, spentUsdc, limitUsdc, limitType }) {
+  const body = `
+    ${eyebrow('Spend alert')}
+    ${headline(`${escapeHtml(keyLabel)} is approaching its limit`)}
+    <p style="margin:0 0 24px 0;color:${COLOR.muted};font-size:14px;">Agent <strong style="color:${COLOR.text};">${escapeHtml(keyLabel)}</strong> has reached <strong style="color:${COLOR.orange};">${escapeHtml(pct)}%</strong> of its ${escapeHtml(limitType)} spend limit.</p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:${COLOR.inner};border:1px solid ${COLOR.borderStrong};border-radius:12px;margin-bottom:28px;">
+      <tr>
+        <td style="padding:22px 24px;font-family:${FONT_SANS};font-size:13px;">
+          <div style="color:${COLOR.faint};font-size:11px;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:6px;">Spent</div>
+          <div style="color:${COLOR.text};font-family:${FONT_SERIF};font-size:28px;font-weight:500;letter-spacing:-0.015em;margin-bottom:18px;">$${escapeHtml(spentUsdc)} <span style="color:${COLOR.faint};font-size:13px;font-family:${FONT_MONO};font-weight:400;letter-spacing:0.04em;">USDC</span></div>
+
+          <div style="color:${COLOR.faint};font-size:11px;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:6px;">Limit</div>
+          <div style="color:${COLOR.text};font-size:14px;">$${escapeHtml(limitUsdc)} USDC</div>
+        </td>
+      </tr>
+    </table>
+    ${button(DASHBOARD_URL, 'Review in dashboard')}
+  `;
+  // F1-email: keyLabel is operator-controlled (api_keys.label, set at
+  // create time from the dashboard POST body). The old code interpolated
+  // it directly into the SMTP subject, which — even if nodemailer
+  // stripped newlines — was the right shape for a header-injection
+  // pivot if upstream sanitization ever failed. sanitizeHeader strips
+  // CR/LF/control chars before we hand the string to nodemailer.
+  // pct and limitType are backend-generated numeric / enum strings
+  // but pipe them through uniformly so future changes don't re-open
+  // the surface.
+  const safeLabel = sanitizeHeader(keyLabel);
+  const safePct = sanitizeHeader(pct);
+  const safeLimitType = sanitizeHeader(limitType);
+  const safeSubject = `Obolus — ${safeLabel} at ${safePct}% of ${safeLimitType} limit`;
+  await sendMailStrict(getTransporter(), {
+    from: from(),
+    to: ownerEmail,
+    subject: safeSubject,
+    text: [
+      `Agent "${keyLabel}" has reached ${pct}% of its ${limitType} spend limit.`,
+      ``,
+      `Spent: $${spentUsdc} USDC`,
+      `Limit: $${limitUsdc} USDC`,
+      ``,
+      `Review in dashboard: ${DASHBOARD_URL}`,
+      ``,
+      `— obolus.com`,
+    ].join('\n'),
+    html: wrap(`${safeLabel} at ${safePct}% of its ${safeLimitType} spend limit`, body),
+  });
+}
+
+// Generic alert dispatcher used by lib/alerts.js. Subject + body are
+// pre-rendered by the alert evaluator so the template stays simple.
+//
+// Note: getTransporter() always returns a transporter — the previous
+// `if (!transporter) return;` guard was dead code (F3-email).
+async function sendAlertEmail({ to, subject, body }) {
+  // F1-email: `subject` reaches here already templated by
+  // lib/alerts.js::deliverFiring as `obolus alert: ${rule.name}`,
+  // which makes rule.name (operator-controlled at rule creation
+  // time) an interpolation source for the SMTP header. Pass it
+  // through sanitizeHeader before sendMail.
+  const safeSubject = sanitizeHeader(subject);
+  const htmlBody = `
+    ${eyebrow('Alert')}
+    ${headline(escapeHtml(safeSubject))}
+    <p style="margin:0 0 24px 0;color:${COLOR.muted};font-size:14px;line-height:1.65;">${escapeHtml(body)}</p>
+    ${button(DASHBOARD_URL, 'Open dashboard')}
+  `;
+  await sendMailStrict(getTransporter(), {
+    from: from(),
+    to,
+    subject: safeSubject,
+    text: `${body}\n\n— obolus.com`,
+    html: wrap(safeSubject, htmlBody),
+  });
+}
+
+module.exports = {
+  sendLoginCode,
+  sendApprovalEmail,
+  sendSpendAlertEmail,
+  sendAlertEmail,
+};
