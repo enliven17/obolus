@@ -21,15 +21,20 @@ export async function POST(req: NextRequest) {
   }
 
   // Backend'e Privy token + email göndererek session al
-  const upstream = await fetch(`${getBackendBaseUrl()}/auth/privy`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Forwarded-Proto': 'https',
-    },
-    body: JSON.stringify({ accessToken, email }),
-    signal: AbortSignal.timeout(15000),
-  });
+  let upstream: Response;
+  try {
+    upstream = await fetch(`${getBackendBaseUrl()}/auth/privy`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forwarded-Proto': 'https',
+      },
+      body: JSON.stringify({ accessToken, email }),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    return NextResponse.json({ error: 'backend_unavailable' }, { status: 502 });
+  }
 
   const data = await upstream.json().catch(() => ({}));
 
