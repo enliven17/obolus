@@ -45,12 +45,12 @@ export default function FeedPage() {
   useEffect(() => {
     // Build feed from delivered orders
     const delivered = orders
-      .filter(o => o.status === 'delivered')
-      .map(o => ({
+      .filter((o) => o.status === 'delivered')
+      .map((o) => ({
         order_id: o.id,
         amount_usdc: o.amount_usdc,
-        card_brand: o.card_brand,
-        solana_txid: o.solana_txid,
+        card_brand: o.card_brand ?? undefined,
+        solana_txid: o.solana_txid ?? undefined,
         completed_at: o.updated_at || o.created_at,
         metadata: o.metadata,
       }))
@@ -76,8 +76,12 @@ export default function FeedPage() {
             { label: 'Payment', value: 'Solana USDC' },
           ].map(({ label, value }) => (
             <Card key={label} style={{ flex: 1, padding: '14px 18px' }}>
-              <div style={{ fontSize: '0.72rem', color: 'var(--fg-dim)', marginBottom: 4 }}>{label}</div>
-              <div style={{ fontSize: '1.2rem', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>{value}</div>
+              <div style={{ fontSize: '0.72rem', color: 'var(--fg-dim)', marginBottom: 4 }}>
+                {label}
+              </div>
+              <div style={{ fontSize: '1.2rem', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
+                {value}
+              </div>
             </Card>
           ))}
         </div>
@@ -85,7 +89,14 @@ export default function FeedPage() {
         {/* Feed */}
         <Card style={{ padding: 0, overflow: 'hidden' }}>
           {feed.length === 0 ? (
-            <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-dim)', fontSize: '0.85rem' }}>
+            <div
+              style={{
+                padding: 32,
+                textAlign: 'center',
+                color: 'var(--fg-dim)',
+                fontSize: '0.85rem',
+              }}
+            >
               No purchases yet. Ask the agent to buy something.
             </div>
           ) : (
@@ -102,33 +113,55 @@ export default function FeedPage() {
                   <div
                     key={entry.order_id}
                     style={{
-                      display: 'flex', alignItems: 'center', gap: 14,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 14,
                       padding: '14px 20px',
                       borderBottom: i < feed.length - 1 ? '1px solid var(--border)' : 'none',
                     }}
                   >
                     {/* Icon */}
-                    <div style={{
-                      width: 36, height: 36, borderRadius: 8,
-                      background: 'var(--surface)', border: '1px solid var(--border)',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      fontSize: '1rem', flexShrink: 0,
-                    }}>
+                    <div
+                      style={{
+                        width: 36,
+                        height: 36,
+                        borderRadius: 8,
+                        background: 'var(--surface)',
+                        border: '1px solid var(--border)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        fontSize: '1rem',
+                        flexShrink: 0,
+                      }}
+                    >
                       {icon}
                     </div>
 
                     {/* Info */}
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontWeight: 600, fontSize: '0.85rem' }}>{name}</div>
-                      <div style={{ fontSize: '0.73rem', color: 'var(--fg-dim)', fontFamily: 'var(--font-mono)', marginTop: 2 }}>
-                        {entry.order_id.slice(0, 8)}…
-                        {entry.card_brand && ` · ${entry.card_brand}`}
+                      <div
+                        style={{
+                          fontSize: '0.73rem',
+                          color: 'var(--fg-dim)',
+                          fontFamily: 'var(--font-mono)',
+                          marginTop: 2,
+                        }}
+                      >
+                        {entry.order_id.slice(0, 8)}…{entry.card_brand && ` · ${entry.card_brand}`}
                       </div>
                     </div>
 
                     {/* Amount */}
                     <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                      <div style={{ fontWeight: 700, fontSize: '0.9rem', fontFamily: 'var(--font-mono)' }}>
+                      <div
+                        style={{
+                          fontWeight: 700,
+                          fontSize: '0.9rem',
+                          fontFamily: 'var(--font-mono)',
+                        }}
+                      >
                         ${parseFloat(entry.amount_usdc).toFixed(2)}
                       </div>
                       <div style={{ fontSize: '0.7rem', color: 'var(--fg-dim)' }}>
@@ -143,10 +176,13 @@ export default function FeedPage() {
                         target="_blank"
                         rel="noreferrer"
                         style={{
-                          fontSize: '0.7rem', color: 'var(--fg-dim)',
+                          fontSize: '0.7rem',
+                          color: 'var(--fg-dim)',
                           fontFamily: 'var(--font-mono)',
-                          textDecoration: 'none', flexShrink: 0,
-                          padding: '3px 8px', borderRadius: 4,
+                          textDecoration: 'none',
+                          flexShrink: 0,
+                          padding: '3px 8px',
+                          borderRadius: 4,
                           border: '1px solid var(--border)',
                           background: 'var(--surface)',
                         }}
@@ -155,13 +191,18 @@ export default function FeedPage() {
                         ↗ tx
                       </a>
                     ) : (
-                      <span style={{
-                        fontSize: '0.7rem', color: 'var(--fg-dim)',
-                        fontFamily: 'var(--font-mono)', flexShrink: 0,
-                        padding: '3px 8px', borderRadius: 4,
-                        border: '1px solid var(--border)',
-                        background: 'var(--surface)',
-                      }}>
+                      <span
+                        style={{
+                          fontSize: '0.7rem',
+                          color: 'var(--fg-dim)',
+                          fontFamily: 'var(--font-mono)',
+                          flexShrink: 0,
+                          padding: '3px 8px',
+                          borderRadius: 4,
+                          border: '1px solid var(--border)',
+                          background: 'var(--surface)',
+                        }}
+                      >
                         devnet sim
                       </span>
                     )}
