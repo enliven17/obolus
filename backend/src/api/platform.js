@@ -27,9 +27,9 @@ router.use(requirePlatformOwner);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function sysStateInt(key) {
+async function sysStateInt(key) {
   const row = /** @type {any} */ (
-    db.prepare(`SELECT value FROM system_state WHERE key = ?`).get(key)
+    await db.prepare(`SELECT value FROM system_state WHERE key = ?`).get(key)
   );
   return parseInt(row?.value || '0', 10) || 0;
 }
@@ -104,21 +104,26 @@ router.get('/overview', async (req, res) => {
   const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
   const counts = {
-    dashboards: /** @type {any} */ (db.prepare(`SELECT COUNT(*) AS n FROM dashboards`).get()).n,
-    users: /** @type {any} */ (db.prepare(`SELECT COUNT(*) AS n FROM users`).get()).n,
-    api_keys: /** @type {any} */ (db.prepare(`SELECT COUNT(*) AS n FROM api_keys`).get()).n,
+    dashboards: /** @type {any} */ (await db.prepare(`SELECT COUNT(*) AS n FROM dashboards`).get())
+      .n,
+    users: /** @type {any} */ (await db.prepare(`SELECT COUNT(*) AS n FROM users`).get()).n,
+    api_keys: /** @type {any} */ (await db.prepare(`SELECT COUNT(*) AS n FROM api_keys`).get()).n,
     active_agents: /** @type {any} */ (
-      db.prepare(`SELECT COUNT(*) AS n FROM api_keys WHERE enabled = 1 AND suspended = 0`).get()
+      await db
+        .prepare(`SELECT COUNT(*) AS n FROM api_keys WHERE enabled = 1 AND suspended = 0`)
+        .get()
     ).n,
-    orders: /** @type {any} */ (db.prepare(`SELECT COUNT(*) AS n FROM orders`).get()).n,
+    orders: /** @type {any} */ (await db.prepare(`SELECT COUNT(*) AS n FROM orders`).get()).n,
   };
 
   const statusCounts = /** @type {any[]} */ (
-    db.prepare(`SELECT status, COUNT(*) AS n FROM orders GROUP BY status ORDER BY n DESC`).all()
+    await db
+      .prepare(`SELECT status, COUNT(*) AS n FROM orders GROUP BY status ORDER BY n DESC`)
+      .all()
   );
 
   const last24h = /** @type {any} */ (
-    db
+    await db
       .prepare(
         `
     SELECT
@@ -139,7 +144,7 @@ router.get('/overview', async (req, res) => {
   const successRate24h = terminal24h > 0 ? (last24h?.delivered ?? 0) / terminal24h : null;
 
   const topAgents = /** @type {any[]} */ (
-    db
+    await db
       .prepare(
         `
     SELECT k.id, k.label, k.dashboard_id, d.name AS dashboard_name, u.email AS owner_email,
@@ -158,15 +163,15 @@ router.get('/overview', async (req, res) => {
   const watcher = {
     last_signature:
       /** @type {any} */ (
-        db.prepare(`SELECT value FROM system_state WHERE key = 'solana_last_signature'`).get()
+        await db.prepare(`SELECT value FROM system_state WHERE key = 'solana_last_signature'`).get()
       )?.value || null,
     last_sig_at:
       /** @type {any} */ (
-        db.prepare(`SELECT value FROM system_state WHERE key = 'solana_last_sig_at'`).get()
+        await db.prepare(`SELECT value FROM system_state WHERE key = 'solana_last_sig_at'`).get()
       )?.value || null,
     dead_letter_24h:
       /** @type {any} */ (
-        db
+        await db
           .prepare(`SELECT COUNT(*) AS n FROM solana_dead_letter WHERE created_at >= ?`)
           .get(since24h)
       )?.n ?? 0,
@@ -177,12 +182,13 @@ router.get('/overview', async (req, res) => {
 
   const system = {
     frozen:
-      /** @type {any} */ (db.prepare(`SELECT value FROM system_state WHERE key = 'frozen'`).get())
-        ?.value === '1',
-    consecutive_failures: sysStateInt('consecutive_failures'),
+      /** @type {any} */ (
+        await db.prepare(`SELECT value FROM system_state WHERE key = 'frozen'`).get()
+      )?.value === '1',
+    consecutive_failures: await sysStateInt('consecutive_failures'),
     webhooks_failed_permanent_24h:
       /** @type {any} */ (
-        db
+        await db
           .prepare(
             `SELECT COUNT(*) AS n FROM webhook_queue WHERE delivered = 0 AND attempts > 3 AND created_at >= ?`,
           )
@@ -190,19 +196,21 @@ router.get('/overview', async (req, res) => {
       )?.n ?? 0,
     webhook_queue_pending:
       /** @type {any} */ (
-        db
+        await db
           .prepare(`SELECT COUNT(*) AS n FROM webhook_queue WHERE delivered = 0 AND attempts <= 3`)
           .get()
       )?.n ?? 0,
     unmatched_payments:
       /** @type {any} */ (
-        db
+        await db
           .prepare(`SELECT COUNT(*) AS n FROM unmatched_payments WHERE refund_solana_txid IS NULL`)
           .get()
       )?.n ?? 0,
     approvals_pending:
       /** @type {any} */ (
-        db.prepare(`SELECT COUNT(*) AS n FROM approval_requests WHERE status = 'pending'`).get()
+        await db
+          .prepare(`SELECT COUNT(*) AS n FROM approval_requests WHERE status = 'pending'`)
+          .get()
       )?.n ?? 0,
   };
 
@@ -232,7 +240,7 @@ router.get('/overview', async (req, res) => {
 // ── GET /orders ───────────────────────────────────────────────────────────────
 // Cross-tenant orders list. Joined with api_keys → dashboards → users so
 // each row carries its owning agent label + dashboard name + owner email.
-router.get('/orders', (req, res) => {
+router.get('/orders', async (req, res) => {
   const { status, dashboard_id, api_key_id } = /** @type {any} */ (req.query);
   const limit = capLimit(req.query.limit, 100, 500);
 
@@ -288,7 +296,7 @@ router.get('/orders', (req, res) => {
   query += ` ORDER BY o.created_at DESC LIMIT ?`;
   params.push(limit);
 
-  const rows = /** @type {any[]} */ (db.prepare(query).all(...params));
+  const rows = /** @type {any[]} */ (await db.prepare(query).all(...params));
   for (const row of rows) {
     row.card_brand = normalizeCardBrand(row.card_brand);
   }
@@ -297,10 +305,10 @@ router.get('/orders', (req, res) => {
 
 // ── GET /agents ───────────────────────────────────────────────────────────────
 // Every api_key across every dashboard, with owner info and lifetime stats.
-router.get('/agents', (req, res) => {
+router.get('/agents', async (req, res) => {
   const { deriveAgentState, batchDeliveredCounts } = require('../lib/agent-state');
   const rows = /** @type {any[]} */ (
-    db
+    await db
       .prepare(
         `
     SELECT
@@ -324,19 +332,21 @@ router.get('/agents', (req, res) => {
       )
       .all()
   );
-  const counts = batchDeliveredCounts(rows.map((r) => r.id));
+  const counts = await batchDeliveredCounts(rows.map((r) => r.id));
   res.json(
-    rows.map((row) => ({
-      ...row,
-      agent: deriveAgentState(row, { deliveredCount: counts.get(row.id) ?? 0 }),
-    })),
+    await Promise.all(
+      rows.map(async (row) => ({
+        ...row,
+        agent: await deriveAgentState(row, { deliveredCount: counts.get(row.id) ?? 0 }),
+      })),
+    ),
   );
 });
 
 // ── GET /users ────────────────────────────────────────────────────────────────
-router.get('/users', (req, res) => {
+router.get('/users', async (req, res) => {
   const rows = /** @type {any[]} */ (
-    db
+    await db
       .prepare(
         `
     SELECT
@@ -357,10 +367,10 @@ router.get('/users', (req, res) => {
 });
 
 // ── GET /dashboards ───────────────────────────────────────────────────────────
-router.get('/dashboards', (req, res) => {
+router.get('/dashboards', async (req, res) => {
   const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const rows = /** @type {any[]} */ (
-    db
+    await db
       .prepare(
         `
     SELECT
@@ -424,10 +434,10 @@ router.get('/treasury', async (req, res) => {
 
 // ── GET /webhooks ─────────────────────────────────────────────────────────────
 // Cross-tenant webhook delivery log with recent pending queue state.
-router.get('/webhooks', (req, res) => {
+router.get('/webhooks', async (req, res) => {
   const limit = capLimit(req.query.limit, 100, 500);
   const deliveries = /** @type {any[]} */ (
-    db
+    await db
       .prepare(
         `
     SELECT
@@ -447,7 +457,7 @@ router.get('/webhooks', (req, res) => {
       .all(limit)
   );
   const queue = /** @type {any[]} */ (
-    db
+    await db
       .prepare(
         `SELECT id, url, attempts, delivered, next_attempt, last_error, created_at
          FROM webhook_queue
@@ -459,9 +469,9 @@ router.get('/webhooks', (req, res) => {
 });
 
 // ── GET /approvals ────────────────────────────────────────────────────────────
-router.get('/approvals', (req, res) => {
+router.get('/approvals', async (req, res) => {
   const rows = /** @type {any[]} */ (
-    db
+    await db
       .prepare(
         `
     SELECT
@@ -488,9 +498,9 @@ router.get('/approvals', (req, res) => {
 // Explicit column list (not SELECT *) so a future migration that adds
 // a sensitive column to unmatched_payments doesn't automatically leak
 // it through this read endpoint.
-router.get('/unmatched-payments', (req, res) => {
+router.get('/unmatched-payments', async (req, res) => {
   const rows = /** @type {any[]} */ (
-    db
+    await db
       .prepare(
         `SELECT id, solana_txid, sender_address, payment_asset, amount_usdc, amount_sol,
                 claimed_order_id, reason, refund_solana_txid, created_at
@@ -503,10 +513,10 @@ router.get('/unmatched-payments', (req, res) => {
 });
 
 // ── GET /policy-decisions ─────────────────────────────────────────────────────
-router.get('/policy-decisions', (req, res) => {
+router.get('/policy-decisions', async (req, res) => {
   const limit = capLimit(req.query.limit, 100, 500);
   const rows = /** @type {any[]} */ (
-    db
+    await db
       .prepare(
         `
     SELECT pd.id, pd.api_key_id, pd.order_id, pd.decision, pd.rule, pd.reason,
@@ -537,10 +547,10 @@ router.get('/policy-decisions', (req, res) => {
 // the shape. safeParse falls back to the raw string on a JSON parse
 // failure — preserves forward-compatibility with any legacy or
 // hand-written audit rows that aren't strict JSON.
-router.get('/audit', (req, res) => {
+router.get('/audit', async (req, res) => {
   const limit = capLimit(req.query.limit, 100, 500);
   const rows = /** @type {any[]} */ (
-    db
+    await db
       .prepare(
         `
     SELECT al.id, al.dashboard_id, al.actor_email, al.actor_role,
@@ -574,23 +584,23 @@ function safeParseJson(s) {
 // ── GET /health ───────────────────────────────────────────────────────────────
 // Platform health snapshot — watcher, dead letter, circuit breaker, recent
 // solana poll errors, webhook backlog.
-router.get('/health', (req, res) => {
+router.get('/health', async (req, res) => {
   const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
   const lastSigAt =
     /** @type {any} */ (
-      db.prepare(`SELECT value FROM system_state WHERE key = 'solana_last_sig_at'`).get()
+      await db.prepare(`SELECT value FROM system_state WHERE key = 'solana_last_sig_at'`).get()
     )?.value || null;
   const lastSignature =
     /** @type {any} */ (
-      db.prepare(`SELECT value FROM system_state WHERE key = 'solana_last_signature'`).get()
+      await db.prepare(`SELECT value FROM system_state WHERE key = 'solana_last_signature'`).get()
     )?.value || null;
   const ageSeconds = lastSigAt
     ? Math.round((Date.now() - new Date(lastSigAt).getTime()) / 1000)
     : null;
 
   const deadLetter = /** @type {any[]} */ (
-    db
+    await db
       .prepare(
         `SELECT tx_hash, ledger, error, created_at FROM solana_dead_letter
          ORDER BY created_at DESC LIMIT 50`,
@@ -601,13 +611,13 @@ router.get('/health', (req, res) => {
   const webhookBacklog = {
     pending:
       /** @type {any} */ (
-        db
+        await db
           .prepare(`SELECT COUNT(*) AS n FROM webhook_queue WHERE delivered = 0 AND attempts < 3`)
           .get()
       )?.n ?? 0,
     failed_permanent_24h:
       /** @type {any} */ (
-        db
+        await db
           .prepare(
             `SELECT COUNT(*) AS n FROM webhook_queue WHERE delivered = 0 AND attempts > 3 AND created_at >= ?`,
           )
@@ -615,13 +625,13 @@ router.get('/health', (req, res) => {
       )?.n ?? 0,
     total_deliveries_24h:
       /** @type {any} */ (
-        db
+        await db
           .prepare(`SELECT COUNT(*) AS n FROM webhook_deliveries WHERE created_at >= ?`)
           .get(since24h)
       )?.n ?? 0,
     failed_deliveries_24h:
       /** @type {any} */ (
-        db
+        await db
           .prepare(
             `SELECT COUNT(*) AS n FROM webhook_deliveries WHERE created_at >= ? AND (response_status IS NULL OR response_status >= 400)`,
           )
@@ -638,16 +648,18 @@ router.get('/health', (req, res) => {
     },
     circuit_breaker: {
       frozen:
-        /** @type {any} */ (db.prepare(`SELECT value FROM system_state WHERE key = 'frozen'`).get())
-          ?.value === '1',
-      consecutive_failures: sysStateInt('consecutive_failures'),
+        /** @type {any} */ (
+          await db.prepare(`SELECT value FROM system_state WHERE key = 'frozen'`).get()
+        )?.value === '1',
+      consecutive_failures: await sysStateInt('consecutive_failures'),
     },
     dead_letter: {
-      total: /** @type {any} */ (db.prepare(`SELECT COUNT(*) AS n FROM solana_dead_letter`).get())
-        .n,
+      total: /** @type {any} */ (
+        await db.prepare(`SELECT COUNT(*) AS n FROM solana_dead_letter`).get()
+      ).n,
       last_24h:
         /** @type {any} */ (
-          db
+          await db
             .prepare(`SELECT COUNT(*) AS n FROM solana_dead_letter WHERE created_at >= ?`)
             .get(since24h)
         )?.n ?? 0,
@@ -656,7 +668,7 @@ router.get('/health', (req, res) => {
     webhook_backlog: webhookBacklog,
     unmatched_payments:
       /** @type {any} */ (
-        db
+        await db
           .prepare(`SELECT COUNT(*) AS n FROM unmatched_payments WHERE refund_solana_txid IS NULL`)
           .get()
       )?.n ?? 0,
@@ -686,7 +698,7 @@ router.get('/health', (req, res) => {
 //   table with dashboard_id='system' sentinel, matching the pattern
 //   from the card-reveal fix. Ops querying audit_log for platform
 //   events no longer has to join two tables.
-router.post('/unfreeze', (req, res) => {
+router.post('/unfreeze', async (req, res) => {
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 1000) : '';
   if (reason.length < 10) {
     return res.status(400).json({
@@ -714,18 +726,20 @@ router.post('/unfreeze', (req, res) => {
   // failure is logged but does NOT block the unfreeze — incident
   // response must not depend on DB liveness.
   try {
-    db.prepare(
-      `INSERT INTO admin_actions (id, actor_email, action, target_type, target_id, metadata, request_id)
+    await db
+      .prepare(
+        `INSERT INTO admin_actions (id, actor_email, action, target_type, target_id, metadata, request_id)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      require('crypto').randomUUID(),
-      req.user.email,
-      'platform.unfreeze',
-      'system',
-      null,
-      JSON.stringify({ ts: now, reason }),
-      req.id || null,
-    );
+      )
+      .run(
+        require('crypto').randomUUID(),
+        req.user.email,
+        'platform.unfreeze',
+        'system',
+        null,
+        JSON.stringify({ ts: now, reason }),
+        req.id || null,
+      );
   } catch (err) {
     console.error(
       `[platform] admin_actions insert failed for unfreeze by ${req.user.email}: ${
@@ -749,7 +763,7 @@ router.post('/unfreeze', (req, res) => {
   const forwarded = Array.isArray(xff) ? xff[0] || null : xff || null;
   const uaHeader = req.headers?.['user-agent'];
   const userAgent = Array.isArray(uaHeader) ? uaHeader[0] || null : uaHeader || null;
-  recordAudit({
+  await recordAudit({
     dashboardId: 'system',
     actor: { id: req.user.id || null, email: req.user.email, role: req.user.role },
     action: 'platform.unfreeze',
@@ -760,8 +774,8 @@ router.post('/unfreeze', (req, res) => {
     userAgent,
   });
 
-  db.prepare(`UPDATE system_state SET value = '0' WHERE key = 'frozen'`).run();
-  db.prepare(`UPDATE system_state SET value = '0' WHERE key = 'consecutive_failures'`).run();
+  await db.prepare(`UPDATE system_state SET value = '0' WHERE key = 'frozen'`).run();
+  await db.prepare(`UPDATE system_state SET value = '0' WHERE key = 'consecutive_failures'`).run();
   res.json({ ok: true, frozen: false });
 });
 
@@ -778,7 +792,7 @@ router.get('/margins', async (req, res) => {
   const limit = Math.min(Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 200), 1000);
 
   const rows = /** @type {any[]} */ (
-    db
+    await db
       .prepare(
         `
       SELECT o.id, o.amount_usdc, o.ctx_invoice_xlm, o.settlement_xlm_usd_rate,

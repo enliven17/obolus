@@ -1,24 +1,10 @@
 // @ts-check
-// Webhook delivery log. Every outbound webhook firing (success or
-// failure) gets persisted with request body, response code, latency,
-// and signing info. Operators can replay or debug webhook problems
-// from the dashboard without shelling into the server.
-//
-// Context discovery: fireWebhook() doesn't know which dashboard the
-// payload belongs to, but nearly every webhook payload carries an
-// `order_id`. We look up the owning dashboard via orders → api_keys →
-// dashboards. If no order_id is present (e.g. a test webhook), the
-// caller passes context explicitly.
+// Webhook delivery log. Every outbound webhook firing (success or failure)
+// gets persisted with request body, response code, latency, and signing info.
 
 /** @type {any} */
 const db = require('../db');
 
-// Defense-in-depth size caps on caller-supplied strings. Callers are
-// expected to pre-truncate (fireWebhook already caps response body at
-// 2000 chars), but enforcing the cap at the write boundary means any
-// future caller that forgets doesn't flood the webhook_deliveries
-// table. Same pattern as the audit.js truncation from the earlier
-// audit cycle. Adversarial audit F2-webhook-log.
 const MAX_URL_CHARS = 2048;
 const MAX_RESPONSE_BODY_CHARS = 4096;
 const MAX_ERROR_CHARS = 1024;
@@ -49,11 +35,11 @@ const insertStmt = db.prepare(`
 
 /**
  * @param {string | null | undefined} orderId
- * @returns {{ dashboardId: string | null; apiKeyId: string | null }}
+ * @returns {Promise<{ dashboardId: string | null; apiKeyId: string | null }>}
  */
-function deriveContextFromOrder(orderId) {
+async function deriveContextFromOrder(orderId) {
   if (!orderId) return { dashboardId: null, apiKeyId: null };
-  const row = /** @type {any} */ (lookupByOrder.get(orderId));
+  const row = /** @type {any} */ (await lookupByOrder.get(orderId));
   if (!row) return { dashboardId: null, apiKeyId: null };
   return { dashboardId: row.dashboard_id ?? null, apiKeyId: row.api_key_id ?? null };
 }
@@ -72,20 +58,18 @@ function deriveContextFromOrder(orderId) {
  * @property {string | null} [apiKeyId]
  */
 
-/**
- * @param {RecordInput} input
- */
-function recordWebhookDelivery(input) {
+/** @param {RecordInput} input */
+async function recordWebhookDelivery(input) {
   try {
     let { dashboardId, apiKeyId } = input;
     if (!dashboardId && input.requestBody && typeof input.requestBody === 'object') {
       const orderId = /** @type {any} */ (input.requestBody).order_id;
-      const derived = deriveContextFromOrder(orderId);
+      const derived = await deriveContextFromOrder(orderId);
       dashboardId = derived.dashboardId;
       apiKeyId = apiKeyId ?? derived.apiKeyId;
     }
-    if (!dashboardId) return; // unattributed deliveries don't get logged
-    insertStmt.run({
+    if (!dashboardId) return;
+    await insertStmt.run({
       dashboard_id: dashboardId,
       api_key_id: apiKeyId ?? null,
       url: clip(input.url, MAX_URL_CHARS),
@@ -118,7 +102,7 @@ function safeStringify(value) {
  * @param {string} dashboardId
  * @param {{ limit?: number; apiKeyId?: string }} [opts]
  */
-function listDeliveries(dashboardId, opts = {}) {
+async function listDeliveries(dashboardId, opts = {}) {
   const limit = Math.min(Math.max(1, opts.limit ?? 50), 200);
   const conditions = ['dashboard_id = @dashboard_id'];
   /** @type {Record<string, unknown>} */
@@ -128,7 +112,7 @@ function listDeliveries(dashboardId, opts = {}) {
     params.api_key_id = opts.apiKeyId;
   }
   return /** @type {any[]} */ (
-    db
+    await db
       .prepare(
         `SELECT id, dashboard_id, api_key_id, url, method, request_body,
                 response_status, response_body, latency_ms, error, signature, created_at
@@ -152,7 +136,4 @@ function safeParse(s) {
   }
 }
 
-module.exports = {
-  recordWebhookDelivery,
-  listDeliveries,
-};
+module.exports = { recordWebhookDelivery, listDeliveries };

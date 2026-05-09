@@ -2,22 +2,20 @@ require('dotenv').config();
 require('./env');
 
 const app = require('./app');
+const { initialize: initDb } = require('./db');
 const { startJobs, stopJobs } = require('./jobs');
 const { startWatcher } = require('./payments/solana');
 const { handlePayment } = require('./payment-handler');
 const { event: bizEvent } = require('./lib/logger');
 const { formatRejection } = require('./lib/process-handlers');
 
-startJobs();
-
-const stopWatcher = startWatcher(handlePayment);
-
 const PORT = process.env.PORT || 4000;
-const server = app.listen(PORT, () => {
-  console.log(
-    `[obolus] backend running on port ${PORT} (${process.env.NODE_ENV || 'development'})`,
-  );
-});
+
+// Mutable refs so gracefulShutdown can reference server/watcher regardless
+// of when the signal arrives relative to startup completion.
+let server = null;
+let stopWatcher = null;
+let shuttingDown = false;
 
 // Graceful shutdown sequence. pm2 sends SIGINT on graceful stop
 // (default) and SIGTERM on `pm2 stop` without --kill-retry-delay —
@@ -38,7 +36,6 @@ const server = app.listen(PORT, () => {
 //      pm2 past its grace period (pm2's default is ~1600 ms, but
 //      obolus-api is configured with a longer kill_timeout in
 //      the ecosystem file so 15 s gives comfortable headroom).
-let shuttingDown = false;
 function gracefulShutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -53,14 +50,18 @@ function gracefulShutdown(signal) {
   } catch (err) {
     console.error('[obolus] stopJobs error:', err);
   }
-  server.close((err) => {
-    if (err) {
-      console.error('[obolus] server.close error:', err);
-      process.exit(1);
-    }
-    console.log('[obolus] shutdown complete');
+  if (server) {
+    server.close((err) => {
+      if (err) {
+        console.error('[obolus] server.close error:', err);
+        process.exit(1);
+      }
+      console.log('[obolus] shutdown complete');
+      process.exit(0);
+    });
+  } else {
     process.exit(0);
-  });
+  }
   // Fallback hard-exit if server.close() never fires (stuck socket,
   // runaway SSE stream, pm2 grace window about to close). 15 s is
   // long enough for in-flight requests to drain at normal latency
@@ -71,6 +72,7 @@ function gracefulShutdown(signal) {
     process.exit(1);
   }, 15_000).unref();
 }
+
 // F1-index (2026-04-16): SIGHUP was previously unhandled, so a pm2
 // reload / systemd HUP / Docker stop would terminate the process via
 // Node's default SIGHUP behaviour without draining in-flight orders,
@@ -128,6 +130,28 @@ process.on('unhandledRejection', (reason) => {
   // fire-and-forget .catch(() => {}) branches where a late reject
   // isn't fatal. Log and let the request finish.
 });
+
+// Run PostgreSQL migrations before accepting traffic, then start background
+// jobs and the Solana watcher. Using a top-level async IIFE so we can await
+// initDb() without converting the whole module to ESM.
+(async () => {
+  try {
+    await initDb();
+  } catch (err) {
+    console.error('[obolus] database initialisation failed:', err);
+    process.exit(1);
+  }
+
+  startJobs();
+
+  stopWatcher = startWatcher(handlePayment);
+
+  server = app.listen(PORT, () => {
+    console.log(
+      `[obolus] backend running on port ${PORT} (${process.env.NODE_ENV || 'development'})`,
+    );
+  });
+})();
 
 // Note: this file has no module.exports. It's the production
 // entrypoint — consumers that want a testable surface should import

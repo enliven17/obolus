@@ -19,7 +19,10 @@ function commaSeparatedEmails(fieldName) {
     .optional()
     .transform((v) => {
       if (!v) return undefined;
-      return v.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+      return v
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean);
     })
     .refine(
       (list) => {
@@ -36,7 +39,10 @@ function commaSeparatedOrigins(fieldName) {
     .optional()
     .transform((v) => {
       if (!v) return undefined;
-      return v.split(',').map((s) => s.trim()).filter(Boolean);
+      return v
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
     })
     .refine(
       (list) => {
@@ -50,7 +56,9 @@ function commaSeparatedOrigins(fieldName) {
           }
         });
       },
-      { message: `${fieldName} contains an invalid origin (must be http(s) URLs, comma-separated)` },
+      {
+        message: `${fieldName} contains an invalid origin (must be http(s) URLs, comma-separated)`,
+      },
     );
 }
 
@@ -68,12 +76,9 @@ function solanaPublicKey(fieldName) {
 function solanaSecretKey(fieldName) {
   return z
     .string()
-    .refine(
-      (v) => /^[1-9A-HJ-NP-Za-km-z]{87,88}$/.test(v) || /^[0-9a-fA-F]{128}$/.test(v),
-      {
-        message: `${fieldName} must be a valid Solana secret key (base58 or 128-char hex)`,
-      },
-    );
+    .refine((v) => /^[1-9A-HJ-NP-Za-km-z]{87,88}$/.test(v) || /^[0-9a-fA-F]{128}$/.test(v), {
+      message: `${fieldName} must be a valid Solana secret key (base58 or 128-char hex)`,
+    });
 }
 
 const EnvSchema = z
@@ -89,8 +94,11 @@ const EnvSchema = z
       }),
     }),
 
-    // Database
-    DB_PATH: z.string().default('./obolus.db'),
+    // Database (Supabase PostgreSQL connection string)
+    DATABASE_URL: z
+      .string()
+      .url('DATABASE_URL must be a valid PostgreSQL connection string (postgresql://...)')
+      .default('postgresql://localhost:5432/obolus'),
 
     // Solana — treasury wallet + program
     SOLANA_NETWORK: z.enum(['devnet', 'mainnet-beta']).default('devnet'),
@@ -105,9 +113,7 @@ const EnvSchema = z
     // VCC fulfillment service
     VCC_API_BASE: httpUrl('VCC_API_BASE'),
     OBOLUS_BASE_URL: httpUrl('OBOLUS_BASE_URL'),
-    VCC_CALLBACK_SECRET: z
-      .string()
-      .min(32, 'VCC_CALLBACK_SECRET must be at least 32 characters'),
+    VCC_CALLBACK_SECRET: z.string().min(32, 'VCC_CALLBACK_SECRET must be at least 32 characters'),
 
     // Bags integration
     BAGS_API_KEY: z.string().optional(),
@@ -121,7 +127,11 @@ const EnvSchema = z
     CORS_ORIGINS: commaSeparatedOrigins('CORS_ORIGINS'),
 
     // Auth
-    OWNER_EMAIL: z.string().email().optional().or(z.literal('').transform(() => undefined)),
+    OWNER_EMAIL: z
+      .string()
+      .email()
+      .optional()
+      .or(z.literal('').transform(() => undefined)),
     OBOLUS_PLATFORM_OWNER_EMAIL: z
       .string()
       .email()
@@ -174,9 +184,7 @@ const EnvSchema = z
 const result = EnvSchema.safeParse(process.env);
 
 if (!result.success) {
-  const missing = result.error.issues
-    .map((i) => `  ${i.path.join('.')}: ${i.message}`)
-    .join('\n');
+  const missing = result.error.issues.map((i) => `  ${i.path.join('.')}: ${i.message}`).join('\n');
   console.error(`[env] Invalid environment variables:\n${missing}`);
   process.exit(1);
 }

@@ -270,7 +270,7 @@ const claimLimiter = rateLimit({
       message: 'Too many claim attempts. Wait a minute and try again.',
     }),
 });
-app.post('/v1/agent/claim', claimLimiter, (req, res) => {
+app.post('/v1/agent/claim', claimLimiter, async (req, res) => {
   const { event: bizEvent } = require('./lib/logger');
   const secretBox = require('./lib/secret-box');
   const { hashClaimCode } = require('./lib/claim-hash');
@@ -314,12 +314,12 @@ app.post('/v1/agent/claim', claimLimiter, (req, res) => {
   const now = new Date().toISOString();
   const ip = /** @type {any} */ (req).ip || /** @type {any} */ (req).socket?.remoteAddress || null;
 
-  const redeemTx = db.transaction((codeHashArg) => {
+  const redeemTx = db.transaction(async (codeHashArg) => {
     const selectStmt = db.prepare(
       `SELECT api_key_id, sealed_payload FROM agent_claims
        WHERE code = ? AND used_at IS NULL AND datetime(expires_at) > datetime('now')`,
     );
-    const rowArg = /** @type {any} */ (selectStmt.get(codeHashArg));
+    const rowArg = /** @type {any} */ (await selectStmt.get(codeHashArg));
     if (!rowArg) return null;
     // Decrypt BEFORE marking used. Any throw here aborts the txn via
     // better-sqlite3's sync rollback semantics so the claim remains
@@ -336,7 +336,7 @@ app.post('/v1/agent/claim', claimLimiter, (req, res) => {
       wrapped.claimDecryptFailed = true;
       throw wrapped;
     }
-    const upd = db
+    const upd = await db
       .prepare(
         `UPDATE agent_claims
          SET used_at = @now, claimed_ip = @ip, sealed_payload = ''
@@ -350,7 +350,7 @@ app.post('/v1/agent/claim', claimLimiter, (req, res) => {
   /** @type {{ row: any, payload: any } | null} */
   let redeemResult;
   try {
-    redeemResult = redeemTx(codeHash);
+    redeemResult = await redeemTx(codeHash);
   } catch (err) {
     // F1-claim: decrypt failure rolled the txn back. The claim is
     // still valid. Log server-side with detail, return a generic
@@ -387,7 +387,9 @@ app.post('/v1/agent/claim', claimLimiter, (req, res) => {
   const payload = redeemResult.payload;
 
   const key = /** @type {any} */ (
-    db.prepare(`SELECT id, label, dashboard_id FROM api_keys WHERE id = ?`).get(row.api_key_id)
+    await db
+      .prepare(`SELECT id, label, dashboard_id FROM api_keys WHERE id = ?`)
+      .get(row.api_key_id)
   );
 
   // F3: write an audit_log row for the claim redemption. This is the
@@ -418,13 +420,15 @@ app.post('/v1/agent/claim', claimLimiter, (req, res) => {
   // redeemed, so the dashboard's modal + state pill progress even if the
   // agent's CLI hasn't yet gotten to its own reportStatus call (network
   // lag, CLI crash between claim and wallet creation, etc.).
-  db.prepare(
-    `UPDATE api_keys
+  await db
+    .prepare(
+      `UPDATE api_keys
      SET agent_state = 'initializing',
          agent_state_at = @at,
          agent_state_detail = 'claim redeemed'
      WHERE id = @id`,
-  ).run({ id: row.api_key_id, at: now });
+    )
+    .run({ id: row.api_key_id, at: now });
 
   // Emit both a generic claim event (for audit) and the typed
   // agent_state event (for the SSE subscribers filtering by type).
@@ -474,9 +478,9 @@ const statusLimiter = rateLimit({
 const PROCESS_STARTED_AT = Date.now();
 
 /** Read a system_state row by key, parse as int, default to 0. */
-function sysStateInt(key) {
+async function sysStateInt(key) {
   const row = /** @type {any} */ (
-    db.prepare(`SELECT value FROM system_state WHERE key = ?`).get(key)
+    await db.prepare(`SELECT value FROM system_state WHERE key = ?`).get(key)
   );
   return parseInt(row?.value || '0', 10) || 0;
 }
@@ -485,7 +489,9 @@ function sysStateInt(key) {
 if (process.env.NODE_ENV !== 'production') {
   app.post('/dev/simulate-payment/:orderId', async (req, res) => {
     const { orderId } = req.params;
-    const order = /** @type {any} */ (db.prepare(`SELECT * FROM orders WHERE id = ?`).get(orderId));
+    const order = /** @type {any} */ (
+      await db.prepare(`SELECT * FROM orders WHERE id = ?`).get(orderId)
+    );
     if (!order) return res.status(404).json({ error: 'order_not_found' });
     if (order.status !== 'pending_payment') {
       return res.status(400).json({ error: 'not_pending', status: order.status });
@@ -503,19 +509,20 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
-app.get('/status', statusLimiter, (req, res) => {
+app.get('/status', statusLimiter, async (req, res) => {
   const frozen =
-    /** @type {any} */ (db.prepare(`SELECT value FROM system_state WHERE key = 'frozen'`).get())
-      ?.value === '1';
-  const consecutiveFailures = sysStateInt('consecutive_failures');
+    /** @type {any} */ (
+      await db.prepare(`SELECT value FROM system_state WHERE key = 'frozen'`).get()
+    )?.value === '1';
+  const consecutiveFailures = await sysStateInt('consecutive_failures');
 
   const pendingCount =
     /** @type {any} */ (
-      db.prepare(`SELECT COUNT(*) as n FROM orders WHERE status = 'pending_payment'`).get()
+      await db.prepare(`SELECT COUNT(*) as n FROM orders WHERE status = 'pending_payment'`).get()
     )?.n ?? 0;
   const inProgressCount =
     /** @type {any} */ (
-      db
+      await db
         .prepare(
           `SELECT COUNT(*) as n FROM orders WHERE status IN ('ordering','payment_confirmed','claim_received','stage1_done')`,
         )
@@ -523,14 +530,14 @@ app.get('/status', statusLimiter, (req, res) => {
     )?.n ?? 0;
   const refundPendingCount =
     /** @type {any} */ (
-      db.prepare(`SELECT COUNT(*) as n FROM orders WHERE status = 'refund_pending'`).get()
+      await db.prepare(`SELECT COUNT(*) as n FROM orders WHERE status = 'refund_pending'`).get()
     )?.n ?? 0;
 
   // Rolling 24h counts by terminal state. Indexed on created_at so this
   // is a range scan of the last day's rows — typically a few hundred.
   const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const last24hRow = /** @type {any} */ (
-    db
+    await db
       .prepare(
         `
       SELECT
@@ -563,14 +570,14 @@ app.get('/status', statusLimiter, (req, res) => {
   // has silently died.
   const SOLANA_WATCHER_MAX_AGE_SECONDS = 120;
   const lastLedgerAtRow = /** @type {any} */ (
-    db.prepare(`SELECT value FROM system_state WHERE key = 'solana_last_sig_at'`).get()
+    await db.prepare(`SELECT value FROM system_state WHERE key = 'solana_last_sig_at'`).get()
   );
   const lastLedgerAt = lastLedgerAtRow?.value || null;
   const lastLedgerAgeSeconds = lastLedgerAt
     ? Math.round((Date.now() - new Date(lastLedgerAt).getTime()) / 1000)
     : null;
   const lastSigRow = /** @type {any} */ (
-    db.prepare(`SELECT value FROM system_state WHERE key = 'solana_last_signature'`).get()
+    await db.prepare(`SELECT value FROM system_state WHERE key = 'solana_last_signature'`).get()
   );
   // Treat null age as "unknown" rather than "stalled" so fresh installs
   // and tests don't flip ok to false before the watcher has made its
@@ -580,13 +587,13 @@ app.get('/status', statusLimiter, (req, res) => {
 
   const solanaDeadLetter24h =
     /** @type {any} */ (
-      db
+      await db
         .prepare(`SELECT COUNT(*) AS n FROM solana_dead_letter WHERE created_at >= ?`)
         .get(since24h)
     )?.n ?? 0;
   const webhooksFailedPermanent24h =
     /** @type {any} */ (
-      db
+      await db
         .prepare(
           `SELECT COUNT(*) AS n FROM webhook_queue
            WHERE delivered = 0 AND attempts > ? AND created_at >= ?`,
@@ -705,14 +712,14 @@ app.use('/v1/orders', ordersRouter);
 // throttle as /v1/orders polling. Before this limiter was added, a
 // compromised key could enumerate the owner's daily spend and bruteforce
 // policy thresholds without burning order-creation budget.
-app.get('/v1/policy/check', orderPollLimiter, (req, res) => {
+app.get('/v1/policy/check', orderPollLimiter, async (req, res) => {
   const amount = String(req.query.amount || '');
   if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
     return res
       .status(400)
       .json({ error: 'invalid_amount', message: 'Query param ?amount= must be a positive number' });
   }
-  return res.json(policyCheck(req.apiKey.id, parseFloat(amount)));
+  return res.json(await policyCheck(req.apiKey.id, parseFloat(amount)));
 });
 
 // POST /v1/agent/status — agent reports setup / lifecycle transitions.
@@ -734,7 +741,7 @@ const agentStatusLimiter = rateLimit({
   legacyHeaders: false,
   handler: (_, res) => res.status(429).json({ error: 'too_many_requests' }),
 });
-app.post('/v1/agent/status', agentStatusLimiter, (req, res) => {
+app.post('/v1/agent/status', agentStatusLimiter, async (req, res) => {
   const { emit: emitBusEvent } = require('./lib/event-bus');
   const { PublicKey } = require('@solana/web3.js');
   const ALLOWED_STATES = new Set(['initializing', 'awaiting_funding', 'funded']);
@@ -805,7 +812,7 @@ app.post('/v1/agent/status', agentStatusLimiter, (req, res) => {
     });
   }
 
-  db.prepare(`UPDATE api_keys SET ${fields.join(', ')} WHERE id = @id`).run(params);
+  await db.prepare(`UPDATE api_keys SET ${fields.join(', ')} WHERE id = @id`).run(params);
 
   emitBusEvent('agent_state', eventPayload);
 
@@ -829,8 +836,8 @@ app.post('/v1/agent/status', agentStatusLimiter, (req, res) => {
 // F3-usage: added explicit expired and rejected counters so agents
 //   can see the full picture — previously both were hidden inside the
 //   wrong in_progress bucket.
-app.get('/v1/usage', orderPollLimiter, (req, res) => {
-  const counts = db
+app.get('/v1/usage', orderPollLimiter, async (req, res) => {
+  const counts = await db
     .prepare(
       `
     SELECT
@@ -848,7 +855,7 @@ app.get('/v1/usage', orderPollLimiter, (req, res) => {
   res.json({
     api_key_id: req.apiKey.id,
     label: req.apiKey.label,
-    budget: buildBudget(req.apiKey),
+    budget: await buildBudget(req.apiKey),
     orders: counts,
   });
 });

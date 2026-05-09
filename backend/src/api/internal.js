@@ -28,7 +28,7 @@ router.use(requireInternal);
 // GET /internal/orders — all orders, NO raw card data.
 // card_number/cvv/expiry are NOT returned here. Use /internal/orders/:id/card
 // for an audited single-order reveal.
-router.get('/orders', (req, res) => {
+router.get('/orders', async (req, res) => {
   const { status, limit = 100, api_key_id } = req.query;
 
   // F3-internal adversarial audit (2026-04-15): reject non-string
@@ -91,7 +91,8 @@ router.get('/orders', (req, res) => {
     Math.min(Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 100, 1000),
   );
   params.push(/** @type {any} */ (clampedLimit));
-  res.json(db.prepare(query).all(...params));
+  const rows = await db.prepare(query).all(...params);
+  res.json(rows);
 });
 
 // GET /internal/orders/:id/card — privileged single-order card reveal.
@@ -114,8 +115,8 @@ router.get('/orders', (req, res) => {
 //   2. Write the audit row synchronously. On ANY failure, return 503
 //      immediately and do NOT ship the card.
 //   3. Only after the audit is durable, return the card JSON.
-router.get('/orders/:id/card', requireCardReveal, (req, res) => {
-  const order = db
+router.get('/orders/:id/card', requireCardReveal, async (req, res) => {
+  const order = await db
     .prepare(
       `SELECT id, card_number, card_cvv, card_expiry, card_brand, api_key_id
        FROM orders WHERE id = ?`,
@@ -168,17 +169,17 @@ router.get('/orders/:id/card', requireCardReveal, (req, res) => {
   // post-count didn't increment.
   try {
     const dashId =
-      db.prepare(`SELECT dashboard_id FROM api_keys WHERE id = ?`).get(order.api_key_id)
+      (await db.prepare(`SELECT dashboard_id FROM api_keys WHERE id = ?`).get(order.api_key_id))
         ?.dashboard_id || 'system';
     const preCount = /** @type {any} */ (
-      db
+      await db
         .prepare(
           `SELECT COUNT(*) AS n FROM audit_log
            WHERE action = 'internal_card_reveal' AND resource_id = ?`,
         )
         .get(order.id)
     ).n;
-    recordAudit({
+    await recordAudit({
       dashboardId: dashId,
       actor: {
         id: req.user.id || null,
@@ -193,7 +194,7 @@ router.get('/orders/:id/card', requireCardReveal, (req, res) => {
       userAgent: req.headers['user-agent'] || null,
     });
     const postCount = /** @type {any} */ (
-      db
+      await db
         .prepare(
           `SELECT COUNT(*) AS n FROM audit_log
            WHERE action = 'internal_card_reveal' AND resource_id = ?`,
@@ -219,11 +220,10 @@ router.get('/orders/:id/card', requireCardReveal, (req, res) => {
 });
 
 // GET /internal/unmatched — on-chain payments that couldn't be matched to an order
-router.get('/unmatched', (req, res) => {
-  res.json(
-    db
-      .prepare(
-        `
+router.get('/unmatched', async (req, res) => {
+  const rows = await db
+    .prepare(
+      `
     SELECT id, solana_txid, sender_address, payment_asset,
            amount_usdc, amount_sol, claimed_order_id, reason,
            refund_solana_txid, created_at
@@ -231,9 +231,9 @@ router.get('/unmatched', (req, res) => {
     ORDER BY created_at DESC
     LIMIT 200
   `,
-      )
-      .all(),
-  );
+    )
+    .all();
+  res.json(rows);
 });
 
 // GET /internal/platform-wallet — platform Solana wallet public key
@@ -253,12 +253,12 @@ router.get('/platform-wallet', (req, res) => {
 
 // GET /internal/stats — extended stats including refund_pending count and unmatched count.
 // Audit A-18: uses shared getOrderStats() plus additional operator/unmatched counts.
-router.get('/stats', (req, res) => {
-  const totals = getOrderStats();
-  const operators = db
+router.get('/stats', async (req, res) => {
+  const totals = await getOrderStats();
+  const operators = await db
     .prepare(`SELECT COUNT(*) AS total, SUM(enabled) AS active FROM api_keys`)
     .get();
-  const unmatched = db
+  const unmatched = await db
     .prepare(`SELECT COUNT(*) AS count FROM unmatched_payments WHERE refund_solana_txid IS NULL`)
     .get();
 
@@ -292,11 +292,10 @@ router.get('/stats', (req, res) => {
 // this old handler.
 
 // GET /internal/operators — all API keys with full detail
-router.get('/operators', (req, res) => {
-  res.json(
-    db
-      .prepare(
-        `
+router.get('/operators', async (req, res) => {
+  const rows = await db
+    .prepare(
+      `
     SELECT id, label, spend_limit_usdc, total_spent_usdc,
            wallet_public_key, enabled, suspended, last_used_at, created_at,
            policy_daily_limit_usdc, policy_single_tx_limit_usdc,
@@ -304,9 +303,9 @@ router.get('/operators', (req, res) => {
     FROM api_keys
     ORDER BY created_at DESC
   `,
-      )
-      .all(),
-  );
+    )
+    .all();
+  res.json(rows);
 });
 
 module.exports = router;

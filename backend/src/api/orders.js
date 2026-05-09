@@ -137,19 +137,21 @@ const orderPollLimiter = rateLimit({
 
 // ── Policy preview (exported for use in app.js) ─────────────────────────────
 
-function policyCheck(apiKeyId, amount) {
+async function policyCheck(apiKeyId, amount) {
   // Preview mode: do NOT persist the decision to policy_decisions. The
   // preview endpoint (GET /v1/policy/check) is read-only from the user's
   // perspective and is rate-limited at 600/min — without this flag every
   // preview call would bloat policy_decisions with fake "decision" rows
   // that never corresponded to a real order and would also pollute the
   // post-incident forensic trail. See checkPolicy's persist option.
-  const result = checkPolicy(apiKeyId, String(amount), { persist: false });
-  const key = /** @type {any} */ (db.prepare(`SELECT * FROM api_keys WHERE id = ?`).get(apiKeyId));
+  const result = await checkPolicy(apiKeyId, String(amount), { persist: false });
+  const key = /** @type {any} */ (
+    await db.prepare(`SELECT * FROM api_keys WHERE id = ?`).get(apiKeyId)
+  );
   let remaining_daily = null;
   if (key?.policy_daily_limit_usdc) {
     const row = /** @type {any} */ (
-      db
+      await db
         .prepare(
           `
       SELECT COALESCE(SUM(CAST(amount_usdc AS REAL)), 0) AS total
@@ -184,11 +186,11 @@ function policyCheck(apiKeyId, amount) {
 
 const IN_FLIGHT_STATUSES_SQL = `('pending_payment','ordering','refund_pending','awaiting_approval')`;
 
-function buildBudget(apiKey) {
+async function buildBudget(apiKey) {
   const settled = parseFloat(apiKey.total_spent_usdc || '0');
   const limit = apiKey.spend_limit_usdc ? parseFloat(apiKey.spend_limit_usdc) : null;
   const inFlightRow = /** @type {any} */ (
-    db
+    await db
       .prepare(
         `SELECT COALESCE(SUM(CAST(amount_usdc AS REAL)), 0) AS total
          FROM orders
@@ -287,7 +289,7 @@ router.post('/', orderCreateLimiter, async (req, res) => {
     ? crypto.createHash('sha256').update(canonicalJson(req.body)).digest('hex')
     : null;
 
-  if (isFrozen()) {
+  if (await isFrozen()) {
     return res.status(503).json({
       error: 'service_temporarily_unavailable',
       message: 'Card fulfillment is temporarily suspended. Please try again later.',
@@ -407,14 +409,14 @@ router.post('/', orderCreateLimiter, async (req, res) => {
   // outside the transaction. Anything that needs to be retried without
   // holding the write lock (HTTP response, outbound notifications,
   // spend-alert emails) runs AFTER the transaction commits.
-  const txnResult = db.transaction(() => {
+  const txnResult = await db.transaction(async () => {
     // Re-check the idempotency cache inside the txn. If another
     // concurrent request finished and wrote the cache while we were
     // waiting on the BEGIN IMMEDIATE lock, we see their response here
     // and return it without double-creating an order.
     if (idempotencyKey) {
       const cached = /** @type {any} */ (
-        db
+        await db
           .prepare(
             `SELECT response_status, response_body, request_fingerprint
              FROM idempotency_keys WHERE key = ? AND api_key_id = ?`,
@@ -452,7 +454,7 @@ router.post('/', orderCreateLimiter, async (req, res) => {
     if (req.apiKey.spend_limit_usdc) {
       const settled = parseFloat(req.apiKey.total_spent_usdc || '0');
       const inFlightRow = /** @type {any} */ (
-        db
+        await db
           .prepare(
             `SELECT COALESCE(SUM(CAST(amount_usdc AS REAL)), 0) AS total
              FROM orders
@@ -474,7 +476,7 @@ router.post('/', orderCreateLimiter, async (req, res) => {
 
     // Policy engine — its daily_limit query is now ALSO inside the txn,
     // so daily_limit can't be breached by concurrent POSTs either.
-    const policyResult = checkPolicy(req.apiKey.id, amount_usdc);
+    const policyResult = await checkPolicy(req.apiKey.id, amount_usdc);
     if (policyResult.decision === 'blocked') {
       return {
         kind: 'policy_blocked',
@@ -487,38 +489,42 @@ router.post('/', orderCreateLimiter, async (req, res) => {
 
     // Approval required branch.
     if (policyResult.decision === 'pending_approval') {
-      db.prepare(
-        `INSERT INTO orders (id, status, amount_usdc, api_key_id, webhook_url, request_id)
+      await db
+        .prepare(
+          `INSERT INTO orders (id, status, amount_usdc, api_key_id, webhook_url, request_id)
          VALUES (@id, 'awaiting_approval', @amount_usdc, @api_key_id, @webhook_url, @request_id)`,
-      ).run({
-        id,
-        amount_usdc: String(amount),
-        api_key_id: req.apiKey.id,
-        webhook_url: webhook_url || null,
-        request_id: req.id || null,
-      });
+        )
+        .run({
+          id,
+          amount_usdc: String(amount),
+          api_key_id: req.apiKey.id,
+          webhook_url: webhook_url || null,
+          request_id: req.id || null,
+        });
 
       const approvalId = uuidv4();
       // Configurable approval TTL. Default 2 hours.
       const approvalTtlMs =
         Math.max(5, parseInt(process.env.APPROVAL_TTL_MINUTES || '120', 10)) * 60 * 1000;
       const expiresAt = new Date(Date.now() + approvalTtlMs).toISOString();
-      db.prepare(
-        `INSERT INTO approval_requests (id, api_key_id, order_id, amount_usdc, agent_note, expires_at)
+      await db
+        .prepare(
+          `INSERT INTO approval_requests (id, api_key_id, order_id, amount_usdc, agent_note, expires_at)
          VALUES (@id, @api_key_id, @order_id, @amount_usdc, @agent_note, @expires_at)`,
-      ).run({
-        id: approvalId,
-        api_key_id: req.apiKey.id,
-        order_id: id,
-        amount_usdc: String(amount),
-        agent_note:
-          typeof req.body.note === 'string' && req.body.note.length > 0
-            ? req.body.note.slice(0, 1000)
-            : null,
-        expires_at: expiresAt,
-      });
+        )
+        .run({
+          id: approvalId,
+          api_key_id: req.apiKey.id,
+          order_id: id,
+          amount_usdc: String(amount),
+          agent_note:
+            typeof req.body.note === 'string' && req.body.note.length > 0
+              ? req.body.note.slice(0, 1000)
+              : null,
+          expires_at: expiresAt,
+        });
 
-      recordDecision(
+      await recordDecision(
         req.apiKey.id,
         id,
         String(amount),
@@ -538,11 +544,19 @@ router.post('/', orderCreateLimiter, async (req, res) => {
       };
 
       if (idempotencyKey) {
-        db.prepare(
-          `INSERT OR IGNORE INTO idempotency_keys
+        await db
+          .prepare(
+            `INSERT OR IGNORE INTO idempotency_keys
            (key, api_key_id, request_fingerprint, response_status, response_body)
            VALUES (?, ?, ?, ?, ?)`,
-        ).run(idempotencyKey, req.apiKey.id, requestFingerprint, 202, JSON.stringify(approvalBody));
+          )
+          .run(
+            idempotencyKey,
+            req.apiKey.id,
+            requestFingerprint,
+            202,
+            JSON.stringify(approvalBody),
+          );
       }
 
       return {
@@ -564,23 +578,25 @@ router.post('/', orderCreateLimiter, async (req, res) => {
         expiry: '12/99',
         brand: 'Visa',
       });
-      db.prepare(
-        `INSERT INTO orders (id, status, amount_usdc, api_key_id, webhook_url, metadata, request_id,
+      await db
+        .prepare(
+          `INSERT INTO orders (id, status, amount_usdc, api_key_id, webhook_url, metadata, request_id,
                              card_number, card_cvv, card_expiry, card_brand)
          VALUES (@id, 'delivered', @amount_usdc, @api_key_id, @webhook_url, @metadata, @request_id,
                  @num, @cvv, @expiry, @brand)`,
-      ).run({
-        id,
-        amount_usdc: String(amount),
-        api_key_id: req.apiKey.id,
-        webhook_url: webhook_url || null,
-        metadata: metadataStr,
-        request_id: req.id || null,
-        num: sealed.number,
-        cvv: sealed.cvv,
-        expiry: sealed.expiry,
-        brand: sealed.brand,
-      });
+        )
+        .run({
+          id,
+          amount_usdc: String(amount),
+          api_key_id: req.apiKey.id,
+          webhook_url: webhook_url || null,
+          metadata: metadataStr,
+          request_id: req.id || null,
+          num: sealed.number,
+          cvv: sealed.cvv,
+          expiry: sealed.expiry,
+          brand: sealed.brand,
+        });
       const sandboxBody = {
         order_id: id,
         status: 'delivered',
@@ -590,11 +606,13 @@ router.post('/', orderCreateLimiter, async (req, res) => {
         card: { number: '4111111111111111', cvv: '123', expiry: '12/99', brand: 'Visa' },
       };
       if (idempotencyKey) {
-        db.prepare(
-          `INSERT OR IGNORE INTO idempotency_keys
+        await db
+          .prepare(
+            `INSERT OR IGNORE INTO idempotency_keys
            (key, api_key_id, request_fingerprint, response_status, response_body)
            VALUES (?, ?, ?, ?, ?)`,
-        ).run(idempotencyKey, req.apiKey.id, requestFingerprint, 201, JSON.stringify(sandboxBody));
+          )
+          .run(idempotencyKey, req.apiKey.id, requestFingerprint, 201, JSON.stringify(sandboxBody));
       }
       return { kind: 'order', status: 201, body: sandboxBody };
     }
@@ -607,7 +625,7 @@ router.post('/', orderCreateLimiter, async (req, res) => {
       usdc: { amount: String(amount), asset: `USDC:${USDC_ISSUER}` },
       ...(solAmount && { sol: { amount: solAmount } }),
     };
-    insertPendingPaymentOrder({
+    await insertPendingPaymentOrder({
       id,
       amount_usdc: String(amount),
       expected_sol_amount: solAmount || null,
@@ -618,9 +636,9 @@ router.post('/', orderCreateLimiter, async (req, res) => {
       request_id: req.id || null,
     });
     const freshKey = /** @type {any} */ (
-      db.prepare(`SELECT * FROM api_keys WHERE id = ?`).get(req.apiKey.id)
+      await db.prepare(`SELECT * FROM api_keys WHERE id = ?`).get(req.apiKey.id)
     );
-    const budget = buildBudget(freshKey);
+    const budget = await buildBudget(freshKey);
     const responseBody = {
       order_id: id,
       status: 'pending_payment',
@@ -631,11 +649,13 @@ router.post('/', orderCreateLimiter, async (req, res) => {
       budget,
     };
     if (idempotencyKey) {
-      db.prepare(
-        `INSERT OR IGNORE INTO idempotency_keys
+      await db
+        .prepare(
+          `INSERT OR IGNORE INTO idempotency_keys
          (key, api_key_id, request_fingerprint, response_status, response_body)
          VALUES (?, ?, ?, ?, ?)`,
-      ).run(idempotencyKey, req.apiKey.id, requestFingerprint, 201, JSON.stringify(responseBody));
+        )
+        .run(idempotencyKey, req.apiKey.id, requestFingerprint, 201, JSON.stringify(responseBody));
     }
     return { kind: 'order', status: 201, body: responseBody };
   })();
@@ -698,7 +718,7 @@ router.post('/', orderCreateLimiter, async (req, res) => {
 // whole history, plus `offset` for simple pagination and a tighter hard
 // cap on `limit` (200 from the previous 100 to support larger polling
 // windows without exceeding DB response size).
-router.get('/', orderPollLimiter, (req, res) => {
+router.get('/', orderPollLimiter, async (req, res) => {
   const { status, limit = 20, offset = 0, since_created_at, since_updated_at } = req.query;
   let query = `SELECT id, status, amount_usdc, payment_asset, created_at, updated_at FROM orders WHERE api_key_id = ?`;
   const params = [req.apiKey.id];
@@ -717,7 +737,8 @@ router.get('/', orderPollLimiter, (req, res) => {
   query += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`;
   params.push(Math.min(parseInt(String(limit)) || 20, 200));
   params.push(Math.max(parseInt(String(offset)) || 0, 0));
-  res.json(db.prepare(query).all(...params));
+  const rows = await db.prepare(query).all(...params);
+  res.json(rows);
 });
 
 // Map internal pipeline statuses → stable agent-facing phase
@@ -735,7 +756,7 @@ const PHASE = {
 
 // Build the public-facing payload for an order row. Shared by GET /:id and
 // GET /:id/stream so both return exactly the same shape.
-function buildOrderResponse(order) {
+async function buildOrderResponse(order) {
   const response = {
     order_id: order.id,
     status: order.status,
@@ -748,7 +769,7 @@ function buildOrderResponse(order) {
 
   if (order.status === 'awaiting_approval') {
     const approval = /** @type {any} */ (
-      db
+      await db
         .prepare(`SELECT id, expires_at, status FROM approval_requests WHERE order_id = ?`)
         .get(order.id)
     );
@@ -836,12 +857,12 @@ const TERMINAL_STATUSES = new Set(['delivered', 'failed', 'refunded', 'expired',
 // immediately. A tight loop could hit 1000+ opens/sec, hammering
 // SQLite and socket setup without breaching any counter. Using the
 // existing 600/min poll limiter caps that axis correctly.
-router.get('/:id/stream', orderPollLimiter, (req, res) => {
+router.get('/:id/stream', orderPollLimiter, async (req, res) => {
   const orderId = req.params.id;
   const keyId = req.apiKey.id;
 
   const initial = /** @type {any} */ (
-    db.prepare(`SELECT * FROM orders WHERE id = ? AND api_key_id = ?`).get(orderId, keyId)
+    await db.prepare(`SELECT * FROM orders WHERE id = ? AND api_key_id = ?`).get(orderId, keyId)
   );
   if (!initial) {
     return res.status(404).json({ error: 'order_not_found' });
@@ -937,8 +958,8 @@ router.get('/:id/stream', orderPollLimiter, (req, res) => {
     return;
   }
 
-  function emit(row) {
-    const payload = buildOrderResponse(row);
+  async function emit(row) {
+    const payload = await buildOrderResponse(row);
     const id = Date.parse(row.updated_at) || Date.now();
     res.write(`id: ${id}\nevent: phase\ndata: ${JSON.stringify(payload)}\n\n`);
     return TERMINAL_STATUSES.has(row.status);
@@ -953,7 +974,7 @@ router.get('/:id/stream', orderPollLimiter, (req, res) => {
   let terminal;
   try {
     lastUpdated = initial.updated_at;
-    terminal = emit(initial);
+    terminal = await emit(initial);
   } catch (err) {
     console.error(
       `[orders.stream] initial emit error for ${orderId}: ${
@@ -977,11 +998,11 @@ router.get('/:id/stream', orderPollLimiter, (req, res) => {
   // a single bad row or racy disconnect. Now we log the error to
   // stderr, close just this stream, and let the other ~999
   // concurrent streams and every background job keep running.
-  tick = setInterval(() => {
+  tick = setInterval(async () => {
     if (closed) return;
     try {
       const row = /** @type {any} */ (
-        db.prepare(`SELECT * FROM orders WHERE id = ? AND api_key_id = ?`).get(orderId, keyId)
+        await db.prepare(`SELECT * FROM orders WHERE id = ? AND api_key_id = ?`).get(orderId, keyId)
       );
       if (!row) {
         closeStream();
@@ -989,7 +1010,7 @@ router.get('/:id/stream', orderPollLimiter, (req, res) => {
       }
       if (row.updated_at !== lastUpdated) {
         lastUpdated = row.updated_at;
-        if (emit(row)) closeStream();
+        if (await emit(row)) closeStream();
       }
     } catch (err) {
       console.error(
@@ -1026,14 +1047,14 @@ router.get('/:id/stream', orderPollLimiter, (req, res) => {
 });
 
 // GET /orders/:id — poll status, returns card details when delivered
-router.get('/:id', orderPollLimiter, (req, res) => {
+router.get('/:id', orderPollLimiter, async (req, res) => {
   const order = /** @type {any} */ (
-    db
+    await db
       .prepare(`SELECT * FROM orders WHERE id = ? AND api_key_id = ?`)
       .get(req.params.id, req.apiKey.id)
   );
   if (!order) return res.status(404).json({ error: 'order_not_found' });
-  res.json(buildOrderResponse(order));
+  res.json(await buildOrderResponse(order));
 });
 
 // Notify owner via Discord + email when an approval is needed
@@ -1075,7 +1096,7 @@ async function notifyOwnerApprovalNeeded({
   // Email to owner
   try {
     const ownerRow = /** @type {any} */ (
-      db.prepare(`SELECT email FROM users WHERE role = 'owner' LIMIT 1`).get()
+      await db.prepare(`SELECT email FROM users WHERE role = 'owner' LIMIT 1`).get()
     );
     if (ownerRow?.email) {
       await sendApprovalEmail(ownerRow.email, {
@@ -1095,10 +1116,12 @@ async function notifyOwnerApprovalNeeded({
 // Alerts at 80% and 90% of daily and total limits.
 // Uses system_state to debounce — only alerts once per threshold crossing.
 async function checkSpendAlert(apiKeyId, newAmount) {
-  const key = /** @type {any} */ (db.prepare(`SELECT * FROM api_keys WHERE id = ?`).get(apiKeyId));
+  const key = /** @type {any} */ (
+    await db.prepare(`SELECT * FROM api_keys WHERE id = ?`).get(apiKeyId)
+  );
   if (!key) return;
   const ownerRow = /** @type {any} */ (
-    db.prepare(`SELECT email FROM users WHERE role = 'owner' LIMIT 1`).get()
+    await db.prepare(`SELECT email FROM users WHERE role = 'owner' LIMIT 1`).get()
   );
   if (!ownerRow?.email) return;
 
@@ -1113,11 +1136,13 @@ async function checkSpendAlert(apiKeyId, newAmount) {
     for (const threshold of THRESHOLDS) {
       if (pct >= threshold) {
         const alertKey = `spend_alert:${apiKeyId}:total:${threshold}`;
-        const already = db.prepare(`SELECT value FROM system_state WHERE key = ?`).get(alertKey);
+        const already = await db
+          .prepare(`SELECT value FROM system_state WHERE key = ?`)
+          .get(alertKey);
         if (!already) {
-          db.prepare(`INSERT OR IGNORE INTO system_state (key, value) VALUES (?, '1')`).run(
-            alertKey,
-          );
+          await db
+            .prepare(`INSERT OR IGNORE INTO system_state (key, value) VALUES (?, '1')`)
+            .run(alertKey);
           sendSpendAlertEmail(ownerRow.email, {
             keyLabel: label,
             pct: threshold,
@@ -1135,7 +1160,7 @@ async function checkSpendAlert(apiKeyId, newAmount) {
   if (key.policy_daily_limit_usdc) {
     const limit = parseFloat(key.policy_daily_limit_usdc);
     const row = /** @type {any} */ (
-      db
+      await db
         .prepare(
           `
       SELECT COALESCE(SUM(CAST(amount_usdc AS REAL)), 0) AS total
@@ -1153,11 +1178,13 @@ async function checkSpendAlert(apiKeyId, newAmount) {
     for (const threshold of THRESHOLDS) {
       if (pct >= threshold) {
         const alertKey = `spend_alert:${apiKeyId}:daily:${threshold}:${today}`;
-        const already = db.prepare(`SELECT value FROM system_state WHERE key = ?`).get(alertKey);
+        const already = await db
+          .prepare(`SELECT value FROM system_state WHERE key = ?`)
+          .get(alertKey);
         if (!already) {
-          db.prepare(`INSERT OR IGNORE INTO system_state (key, value) VALUES (?, '1')`).run(
-            alertKey,
-          );
+          await db
+            .prepare(`INSERT OR IGNORE INTO system_state (key, value) VALUES (?, '1')`)
+            .run(alertKey);
           sendSpendAlertEmail(ownerRow.email, {
             keyLabel: label,
             pct: threshold,

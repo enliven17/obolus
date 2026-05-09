@@ -124,14 +124,16 @@ async function callPayCtxOrderWithAmbiguousPark(paymentUrl, opts, orderId, short
     if ((status === 'unknown' || status === 'applied_failed') && txHash) {
       const { publicMessage } = require('./lib/sanitize-error');
 
-      db.prepare(
-        `UPDATE orders
+      await db
+        .prepare(
+          `UPDATE orders
          SET status = 'failed',
              error = ?,
              ctx_solana_txid = ?,
              updated_at = ?
          WHERE id = ?`,
-      ).run(publicMessage('ctx_payment_ambiguous'), txHash, new Date().toISOString(), orderId);
+        )
+        .run(publicMessage('ctx_payment_ambiguous'), txHash, new Date().toISOString(), orderId);
       logger.event('ctx.payment_ambiguous', {
         order_id: orderId,
         solana_status: status,
@@ -171,7 +173,7 @@ async function expireStaleOrders() {
   const now = new Date().toISOString();
   const cutoff = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
 
-  const result = db
+  const result = await db
     .prepare(
       `
     UPDATE orders SET status = 'expired', updated_at = ?
@@ -183,7 +185,7 @@ async function expireStaleOrders() {
   if (result.changes === 0) return;
 
   const expired = /** @type {any[]} */ (
-    db
+    await db
       .prepare(
         `
     SELECT o.*, k.webhook_secret, k.default_webhook_url
@@ -240,7 +242,7 @@ async function reconcileOrderingFulfillment() {
   // Stuck orders stay in 'ordering' until ops unfreezes, which is the
   // correct emergency-stop semantic.
   const { isFrozen } = require('./fulfillment');
-  if (isFrozen()) {
+  if (await isFrozen()) {
     log('reconcileOrderingFulfillment skipped — system frozen');
     return;
   }
@@ -253,7 +255,7 @@ async function reconcileOrderingFulfillment() {
   // rows stay in status='ordering' but never re-enter the retry loop
   // until ops manually clears ctx_solana_txid.
   const stuck = /** @type {any[]} */ (
-    db
+    await db
       .prepare(
         `
     SELECT * FROM orders
@@ -294,10 +296,9 @@ async function reconcileOrderingFulfillment() {
           log(`  ${shortId} → vcc status check failed: ${err.message} — postponing hard-fail`);
           // Treat as in-progress: bump updated_at so we don't hammer vcc on
           // every 5-minute tick when vcc is down, and wait until it's back.
-          db.prepare(`UPDATE orders SET updated_at = ? WHERE id = ?`).run(
-            new Date().toISOString(),
-            order.id,
-          );
+          await db
+            .prepare(`UPDATE orders SET updated_at = ? WHERE id = ?`)
+            .run(new Date().toISOString(), order.id);
           continue;
         }
         if (vccStatus && VCC_IN_PROGRESS_STATUSES.has(vccStatus)) {
@@ -320,10 +321,9 @@ async function reconcileOrderingFulfillment() {
           }
           // Reset the clock so we give vcc another full FAIL_AFTER window
           // to land the card via its normal callback path.
-          db.prepare(`UPDATE orders SET updated_at = ? WHERE id = ?`).run(
-            new Date().toISOString(),
-            order.id,
-          );
+          await db
+            .prepare(`UPDATE orders SET updated_at = ? WHERE id = ?`)
+            .run(new Date().toISOString(), order.id);
           continue;
         }
       }
@@ -344,7 +344,7 @@ async function reconcileOrderingFulfillment() {
       // changes === 0 means the row was concurrently flipped to a
       // terminal state (delivered/failed/etc.) by another path and
       // we must NOT call scheduleRefund on it.
-      const claimed = db
+      const claimed = await db
         .prepare(
           `UPDATE orders
              SET status = 'failed', error = ?, updated_at = ?
@@ -373,7 +373,7 @@ async function reconcileOrderingFulfillment() {
     }
 
     // Claim this attempt atomically so two overlapping job ticks don't both retry.
-    const claim = db
+    const claim = await db
       .prepare(
         `
       UPDATE orders
@@ -402,9 +402,11 @@ async function reconcileOrderingFulfillment() {
         );
         vccJobId = inv.vccJobId;
         paymentUrl = inv.paymentUrl;
-        db.prepare(
-          `UPDATE orders SET vcc_job_id = ?, callback_nonce = ?, updated_at = ? WHERE id = ?`,
-        ).run(vccJobId, inv.callbackNonce, new Date().toISOString(), order.id);
+        await db
+          .prepare(
+            `UPDATE orders SET vcc_job_id = ?, callback_nonce = ?, updated_at = ? WHERE id = ?`,
+          )
+          .run(vccJobId, inv.callbackNonce, new Date().toISOString(), order.id);
       }
 
       // Step 2: ensure the SOL payment was sent. If sol_sent_at is null we
@@ -429,11 +431,9 @@ async function reconcileOrderingFulfillment() {
           // run must have paid — don't double-send, just mark sol_sent_at.
           if (vccJob.status && vccJob.status !== 'invoice_issued') {
             log(`  ${shortId} → vcc reports ${vccJob.status}; skipping payCtxOrder`);
-            db.prepare(`UPDATE orders SET sol_sent_at = ?, updated_at = ? WHERE id = ?`).run(
-              new Date().toISOString(),
-              new Date().toISOString(),
-              order.id,
-            );
+            await db
+              .prepare(`UPDATE orders SET sol_sent_at = ?, updated_at = ? WHERE id = ?`)
+              .run(new Date().toISOString(), new Date().toISOString(), order.id);
           } else {
             log(`  ${shortId} → retry payCtxOrder (asset=${retryOpts.paymentAsset})`);
             const txHash = await callPayCtxOrderWithAmbiguousPark(
@@ -443,9 +443,11 @@ async function reconcileOrderingFulfillment() {
               shortId,
             );
             if (txHash === AMBIGUOUS_PARKED) continue;
-            db.prepare(
-              `UPDATE orders SET sol_sent_at = ?, ctx_solana_txid = ?, updated_at = ? WHERE id = ?`,
-            ).run(new Date().toISOString(), txHash || null, new Date().toISOString(), order.id);
+            await db
+              .prepare(
+                `UPDATE orders SET sol_sent_at = ?, ctx_solana_txid = ?, updated_at = ? WHERE id = ?`,
+              )
+              .run(new Date().toISOString(), txHash || null, new Date().toISOString(), order.id);
           }
         } else {
           log(`  ${shortId} → retry payCtxOrder (asset=${retryOpts.paymentAsset})`);
@@ -456,9 +458,11 @@ async function reconcileOrderingFulfillment() {
             shortId,
           );
           if (txHash === AMBIGUOUS_PARKED) continue;
-          db.prepare(
-            `UPDATE orders SET sol_sent_at = ?, ctx_solana_txid = ?, updated_at = ? WHERE id = ?`,
-          ).run(new Date().toISOString(), txHash || null, new Date().toISOString(), order.id);
+          await db
+            .prepare(
+              `UPDATE orders SET sol_sent_at = ?, ctx_solana_txid = ?, updated_at = ? WHERE id = ?`,
+            )
+            .run(new Date().toISOString(), txHash || null, new Date().toISOString(), order.id);
         }
       }
 
@@ -466,11 +470,9 @@ async function reconcileOrderingFulfillment() {
       if (!order.vcc_notified_at) {
         log(`  ${shortId} → retry notifyPaid`);
         await vccClient.notifyPaid(vccJobId);
-        db.prepare(`UPDATE orders SET vcc_notified_at = ?, updated_at = ? WHERE id = ?`).run(
-          new Date().toISOString(),
-          new Date().toISOString(),
-          order.id,
-        );
+        await db
+          .prepare(`UPDATE orders SET vcc_notified_at = ?, updated_at = ? WHERE id = ?`)
+          .run(new Date().toISOString(), new Date().toISOString(), order.id);
       }
 
       log(`  ${shortId} → reconciled; waiting for vcc callback`);
@@ -501,7 +503,7 @@ async function reconcileOrderingFulfillment() {
 // doesn't".
 async function recoverStuckOrders() {
   const stuck = /** @type {any[]} */ (
-    db
+    await db
       .prepare(
         `
     SELECT * FROM orders
@@ -538,7 +540,7 @@ async function recoverStuckOrders() {
           age_minutes: Math.round((Date.now() - Date.parse(order.updated_at)) / 60000),
           via: 'recover',
         });
-        db.prepare(`UPDATE orders SET updated_at = ? WHERE id = ?`).run(now, order.id);
+        await db.prepare(`UPDATE orders SET updated_at = ? WHERE id = ?`).run(now, order.id);
       } else if (vccJob.status === 'failed') {
         const { publicMessage } = require('./lib/sanitize-error');
         // F1-recover (2026-04-16): atomic claim on the transition
@@ -550,7 +552,7 @@ async function recoverStuckOrders() {
         // responsible for (pending_payment, ordering); any concurrent
         // transition to delivered/failed/refund_pending/refunded
         // makes changes === 0 and skips the scheduleRefund call.
-        const claimed = db
+        const claimed = await db
           .prepare(
             `UPDATE orders
                SET status = 'failed', error = ?, updated_at = ?
@@ -585,7 +587,7 @@ async function recoverStuckOrders() {
 async function retryWebhooks() {
   const now = new Date().toISOString();
   const rows = /** @type {any[]} */ (
-    db
+    await db
       .prepare(
         `
     SELECT * FROM webhook_queue
@@ -620,7 +622,7 @@ async function retryWebhooks() {
           payload.card.number === null
         ) {
           const orderRow = /** @type {any} */ (
-            db
+            await db
               .prepare(
                 `SELECT card_number, card_cvv, card_expiry, card_brand FROM orders WHERE id = ?`,
               )
@@ -656,17 +658,19 @@ async function retryWebhooks() {
                 attempts: row.attempts,
                 error: vaultMsg,
               });
-              db.prepare(
-                `UPDATE webhook_queue
+              await db
+                .prepare(
+                  `UPDATE webhook_queue
                  SET attempts = ?, last_error = ?, next_attempt = ?
                  WHERE id = ?`,
-              ).run(MAX_WEBHOOK_ATTEMPTS + 1, `vault_open_failed: ${vaultMsg}`, now, row.id);
+                )
+                .run(MAX_WEBHOOK_ATTEMPTS + 1, `vault_open_failed: ${vaultMsg}`, now, row.id);
               return; // Skip the fire, skip the delivery catch path.
             }
           }
         }
         await fireWebhook(row.url, payload, row.secret, null);
-        db.prepare(`UPDATE webhook_queue SET delivered = 1 WHERE id = ?`).run(row.id);
+        await db.prepare(`UPDATE webhook_queue SET delivered = 1 WHERE id = ?`).run(row.id);
         log(`  webhook ${row.id.slice(0, 8)} delivered`);
       } catch (err) {
         const nextAttempts = row.attempts + 1;
@@ -674,11 +678,13 @@ async function retryWebhooks() {
         // attempts=1→delay[1]=5m, attempts=2→delay[2]=30m, attempts=3→delay[3]=null→abandon
         const delayMs = WEBHOOK_RETRY_DELAYS_MS[row.attempts] ?? null;
         if (delayMs === null || nextAttempts > MAX_WEBHOOK_ATTEMPTS) {
-          db.prepare(
-            `
+          await db
+            .prepare(
+              `
           UPDATE webhook_queue SET attempts = ?, last_error = ?, next_attempt = ? WHERE id = ?
         `,
-          ).run(nextAttempts, err.message, now, row.id);
+            )
+            .run(nextAttempts, err.message, now, row.id);
           log(`  webhook ${row.id.slice(0, 8)} failed permanently: ${err.message}`);
           // Surface abandoned deliveries via bizEvent + /status metric.
           // Before this, a permanently failed webhook was visible only by
@@ -694,11 +700,13 @@ async function retryWebhooks() {
           });
         } else {
           const nextAttempt = new Date(Date.now() + delayMs).toISOString();
-          db.prepare(
-            `
+          await db
+            .prepare(
+              `
           UPDATE webhook_queue SET attempts = ?, last_error = ?, next_attempt = ? WHERE id = ?
         `,
-          ).run(nextAttempts, err.message, nextAttempt, row.id);
+            )
+            .run(nextAttempts, err.message, nextAttempt, row.id);
           log(`  webhook ${row.id.slice(0, 8)} retry scheduled for ${nextAttempt}`);
         }
       }
@@ -708,9 +716,9 @@ async function retryWebhooks() {
 
 // Expire pending approval requests that have passed their 2-hour window.
 // Transitions those orders to 'rejected' so agents get a clear terminal status.
-function expireApprovalRequests() {
+async function expireApprovalRequests() {
   const expired = /** @type {any[]} */ (
-    db
+    await db
       .prepare(
         `
     SELECT * FROM approval_requests
@@ -730,7 +738,7 @@ function expireApprovalRequests() {
     // operator raced us to 'approved' or 'rejected' between our SELECT
     // above and this UPDATE, leave their decision alone and skip the
     // order-state flip below.
-    const approvalChanged = db
+    const approvalChanged = await db
       .prepare(
         `UPDATE approval_requests
          SET status = 'expired', decided_at = ?
@@ -741,15 +749,17 @@ function expireApprovalRequests() {
       log(`  approval ${approval.id.slice(0, 8)} decided by operator in-flight — skipping expiry`);
       continue;
     }
-    db.prepare(
-      `UPDATE orders
+    await db
+      .prepare(
+        `UPDATE orders
        SET status = 'rejected', error = ?, updated_at = ?
        WHERE id = ? AND status = 'awaiting_approval'`,
-    ).run(
-      'Approval request expired — owner did not respond within 2 hours',
-      now,
-      approval.order_id,
-    );
+      )
+      .run(
+        'Approval request expired — owner did not respond within 2 hours',
+        now,
+        approval.order_id,
+      );
     recordDecision(
       approval.api_key_id,
       approval.order_id,
@@ -782,9 +792,9 @@ function expireApprovalRequests() {
 // refund post-delivery) would silently skip the purge and leak
 // PAN/CVV past its TTL. Filtering on the presence of card data
 // makes the privacy objective unambiguous.
-function purgeOldCards() {
+async function purgeOldCards() {
   const days = parseRetentionDays('CARD_RETENTION_DAYS', 30);
-  const result = db
+  const result = await db
     .prepare(
       `
     UPDATE orders
@@ -798,8 +808,8 @@ function purgeOldCards() {
 }
 
 // Clean up expired idempotency keys older than 24 hours
-function pruneIdempotencyKeys() {
-  const result = db
+async function pruneIdempotencyKeys() {
+  const result = await db
     .prepare(
       `
     DELETE FROM idempotency_keys
@@ -816,8 +826,8 @@ function pruneIdempotencyKeys() {
 // was already carrying 3 expired rows out of 10; at pilot cadence
 // that's fine, but at steady state the table grows at roughly
 // (users × logins_per_day) per day.
-function pruneExpiredSessions() {
-  const result = db
+async function pruneExpiredSessions() {
+  const result = await db
     .prepare(`DELETE FROM sessions WHERE datetime(expires_at) < datetime('now')`)
     .run();
   if (result.changes > 0) log(`pruned ${result.changes} expired session(s)`);
@@ -827,8 +837,8 @@ function pruneExpiredSessions() {
 // or expired OTP rows indefinitely is pure DB bloat — the row carries
 // no value once it's been used or expired and all brute-force
 // protection uses the short active window.
-function pruneExpiredAuthCodes() {
-  const result = db
+async function pruneExpiredAuthCodes() {
+  const result = await db
     .prepare(
       `DELETE FROM auth_codes
        WHERE datetime(expires_at) < datetime('now', '-1 hours')`,
@@ -842,8 +852,8 @@ function pruneExpiredAuthCodes() {
 // sealed_payload column is already wiped at redemption time so
 // there's no secret leak from keeping the row around, but the row
 // itself is still garbage.
-function pruneExpiredAgentClaims() {
-  const result = db
+async function pruneExpiredAgentClaims() {
+  const result = await db
     .prepare(
       `DELETE FROM agent_claims
        WHERE (used_at IS NOT NULL AND datetime(used_at) < datetime('now', '-24 hours'))
@@ -859,9 +869,9 @@ function pruneExpiredAgentClaims() {
 // noise. Cards are already redacted from request_body by fulfillment.js
 // before persistence so there's no data-minimisation concern beyond
 // the standard "small tables are faster to query" argument.
-function pruneWebhookDeliveries() {
+async function pruneWebhookDeliveries() {
   const days = parseRetentionDays('WEBHOOK_LOG_RETENTION_DAYS', 30);
-  const result = db
+  const result = await db
     .prepare(`DELETE FROM webhook_deliveries WHERE datetime(created_at) < datetime('now', ?)`)
     .run(`-${days} days`);
   if (result.changes > 0) log(`pruned ${result.changes} webhook delivery log row(s)`);
@@ -871,9 +881,9 @@ function pruneWebhookDeliveries() {
 // (default 90). Policy decisions are audit info for "why was this
 // order blocked" — a 90-day window is plenty for operator follow-up
 // questions, and the audit_log has its own history.
-function prunePolicyDecisions() {
+async function prunePolicyDecisions() {
   const days = parseRetentionDays('POLICY_DECISIONS_RETENTION_DAYS', 90);
-  const result = db
+  const result = await db
     .prepare(`DELETE FROM policy_decisions WHERE datetime(created_at) < datetime('now', ?)`)
     .run(`-${days} days`);
   if (result.changes > 0) log(`pruned ${result.changes} policy decision(s)`);
@@ -956,7 +966,7 @@ function horizonBase() {
 async function checkAgentFundingStatus() {
   const usdcIssuer = process.env.SOLANA_USDC_MINT || MAINNET_USDC_ISSUER;
   const awaiting = /** @type {any[]} */ (
-    db
+    await db
       .prepare(
         `SELECT id, wallet_public_key
          FROM api_keys
@@ -1033,17 +1043,19 @@ async function checkAgentFundingStatus() {
       const funded = sol >= 2 || usdc > 0;
       if (!funded) continue;
 
-      db.prepare(
-        `UPDATE api_keys
+      await db
+        .prepare(
+          `UPDATE api_keys
          SET agent_state = 'funded',
              agent_state_at = @at,
              agent_state_detail = @detail
          WHERE id = @id`,
-      ).run({
-        id: row.id,
-        at: new Date().toISOString(),
-        detail: `sol=${sol.toFixed(4)} usdc=${usdc.toFixed(2)}`,
-      });
+        )
+        .run({
+          id: row.id,
+          at: new Date().toISOString(),
+          detail: `sol=${sol.toFixed(4)} usdc=${usdc.toFixed(2)}`,
+        });
       emitBusEvent('agent_state', {
         api_key_id: row.id,
         state: 'funded',
@@ -1218,7 +1230,7 @@ function stopJobs() {
 async function evaluateAlertsForAllDashboards() {
   const alerts = require('./lib/alerts');
   const db = require('./db');
-  const rows = /** @type {any[]} */ (db.prepare(`SELECT id FROM dashboards`).all());
+  const rows = /** @type {any[]} */ (await db.prepare(`SELECT id FROM dashboards`).all());
   for (const row of rows) {
     try {
       await alerts.evaluateRules(row.id);

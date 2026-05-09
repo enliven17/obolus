@@ -67,7 +67,7 @@ function shortString(value, max) {
 // coarse 'refresh' ping when business events unrelated to a specific
 // key happen (system freeze, key lifecycle). Clients should refetch
 // their full state on 'refresh' and patch on the typed events.
-router.get('/stream', (req, res) => {
+router.get('/stream', async (req, res) => {
   const { subscribe } = require('../lib/event-bus');
   const { tryAcquireStreamSlot, releaseStreamSlot } = require('./orders');
   const dashboardId = req.dashboard.id;
@@ -89,7 +89,7 @@ router.get('/stream', (req, res) => {
   // filter events cheaply. Re-read on each event would hammer the DB
   // under fanout.
   const keyRows = /** @type {any[]} */ (
-    db.prepare(`SELECT id FROM api_keys WHERE dashboard_id = ?`).all(dashboardId)
+    await db.prepare(`SELECT id FROM api_keys WHERE dashboard_id = ?`).all(dashboardId)
   );
   const ownedKeys = new Set(keyRows.map((r) => r.id));
 
@@ -194,10 +194,10 @@ router.get('/stream', (req, res) => {
 // ── Dashboard info ────────────────────────────────────────────────────────────
 
 // GET /dashboard — dashboard info + live stats
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   const d = req.dashboard;
 
-  const stats = db
+  const stats = await db
     .prepare(
       `
     SELECT
@@ -214,21 +214,25 @@ router.get('/', (req, res) => {
     )
     .get(d.id);
 
-  const activeKeys = db
-    .prepare(
-      `SELECT COUNT(*) AS n FROM api_keys WHERE dashboard_id = ? AND enabled = 1 AND suspended = 0`,
-    )
-    .get(d.id).n;
+  const activeKeys = (
+    await db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM api_keys WHERE dashboard_id = ? AND enabled = 1 AND suspended = 0`,
+      )
+      .get(d.id)
+  ).n;
 
-  const pendingApprovals = db
-    .prepare(
-      `
+  const pendingApprovals = (
+    await db
+      .prepare(
+        `
     SELECT COUNT(*) AS n FROM approval_requests ar
     JOIN api_keys k ON ar.api_key_id = k.id
     WHERE k.dashboard_id = ? AND ar.status = 'pending'
   `,
-    )
-    .get(d.id).n;
+      )
+      .get(d.id)
+  ).n;
 
   res.json({
     id: d.id,
@@ -242,8 +246,8 @@ router.get('/', (req, res) => {
 });
 
 // GET /dashboard/stats
-router.get('/stats', (req, res) => {
-  const totals = db
+router.get('/stats', async (req, res) => {
+  const totals = await db
     .prepare(
       `
     SELECT
@@ -261,9 +265,11 @@ router.get('/stats', (req, res) => {
     )
     .get(req.dashboard.id);
 
-  const activeKeys = db
-    .prepare(`SELECT COUNT(*) AS n FROM api_keys WHERE dashboard_id = ? AND enabled = 1`)
-    .get(req.dashboard.id).n;
+  const activeKeys = (
+    await db
+      .prepare(`SELECT COUNT(*) AS n FROM api_keys WHERE dashboard_id = ? AND enabled = 1`)
+      .get(req.dashboard.id)
+  ).n;
 
   res.json({ ...totals, active_keys: activeKeys });
 });
@@ -271,7 +277,7 @@ router.get('/stats', (req, res) => {
 // ── Orders ────────────────────────────────────────────────────────────────────
 
 // GET /dashboard/orders
-router.get('/orders', (req, res) => {
+router.get('/orders', async (req, res) => {
   const { normalizeCardBrand } = require('../lib/normalize-card');
   const { status, limit = 50, api_key_id } = /** @type {Record<string, any>} */ (req.query);
   let query = `
@@ -289,7 +295,7 @@ router.get('/orders', (req, res) => {
   }
   if (api_key_id) {
     // Verify api_key_id belongs to this dashboard
-    const owns = db
+    const owns = await db
       .prepare(`SELECT 1 FROM api_keys WHERE id = ? AND dashboard_id = ?`)
       .get(String(api_key_id), req.dashboard.id);
     if (!owns) return res.status(403).json({ error: 'forbidden' });
@@ -298,7 +304,7 @@ router.get('/orders', (req, res) => {
   }
   query += ` ORDER BY o.created_at DESC LIMIT ?`;
   params.push(/** @type {any} */ (Math.min(parseInt(String(limit)) || 50, 500)));
-  const rows = /** @type {any[]} */ (db.prepare(query).all(...params));
+  const rows = /** @type {any[]} */ (await db.prepare(query).all(...params));
   // Normalize the upstream catalog string before it reaches a human
   // surface. The DB intentionally keeps the raw value for ops forensics
   // (per vcc-callback.js), but dashboard consumers should always see
@@ -344,8 +350,17 @@ function validateApiKeyFields({
     }
   }
   if (wallet_public_key !== undefined && wallet_public_key !== null && wallet_public_key !== '') {
-    const { Keypair: _SolKeypair } = require('@solana/web3.js');
-    if (!((x) => { try { new (require('@solana/web3.js').PublicKey)(x); return true; } catch { return false; } })(wallet_public_key)) {
+    // validate public key format only
+    if (
+      !((x) => {
+        try {
+          new (require('@solana/web3.js').PublicKey)(x);
+          return true;
+        } catch {
+          return false;
+        }
+      })(wallet_public_key)
+    ) {
       return {
         error: 'invalid_wallet_public_key',
         message: 'wallet_public_key must be a valid Solana base58 public key',
@@ -397,10 +412,10 @@ function validateApiKeyFields({
 }
 
 // GET /dashboard/api-keys
-router.get('/api-keys', requirePermission('agent:read'), (req, res) => {
+router.get('/api-keys', requirePermission('agent:read'), async (req, res) => {
   const { deriveAgentState, batchDeliveredCounts } = require('../lib/agent-state');
   const rows = /** @type {any[]} */ (
-    db
+    await db
       .prepare(
         `
     SELECT id, label, spend_limit_usdc, total_spent_usdc, default_webhook_url, wallet_public_key,
@@ -417,12 +432,14 @@ router.get('/api-keys', requirePermission('agent:read'), (req, res) => {
   // F1-agent-state: batch the delivered-count lookup into a single
   // GROUP BY instead of firing one SELECT COUNT(*) per row. For a
   // 100-agent dashboard this collapses 100 sequential queries into 1.
-  const counts = batchDeliveredCounts(rows.map((r) => r.id));
+  const counts = await batchDeliveredCounts(rows.map((r) => r.id));
   res.json(
-    rows.map((row) => ({
-      ...row,
-      agent: deriveAgentState(row, { deliveredCount: counts.get(row.id) ?? 0 }),
-    })),
+    await Promise.all(
+      rows.map(async (row) => ({
+        ...row,
+        agent: await deriveAgentState(row, { deliveredCount: counts.get(row.id) ?? 0 }),
+      })),
+    ),
   );
 });
 
@@ -451,8 +468,9 @@ router.post('/api-keys', requirePermission('agent:create'), async (req, res) => 
   const keyHash = await bcrypt.hash(rawKey, 10);
   const webhookSecret = `whsec_${crypto.randomBytes(32).toString('hex')}`;
 
-  db.prepare(
-    `
+  await db
+    .prepare(
+      `
     INSERT INTO api_keys
       (id, key_hash, key_prefix, label, spend_limit_usdc, webhook_secret,
        default_webhook_url, wallet_public_key, dashboard_id)
@@ -460,17 +478,18 @@ router.post('/api-keys', requirePermission('agent:create'), async (req, res) => 
       (@id, @keyHash, @keyPrefix, @label, @spend_limit_usdc, @webhookSecret,
        @default_webhook_url, @wallet_public_key, @dashboard_id)
   `,
-  ).run({
-    id,
-    keyHash,
-    keyPrefix,
-    label: label || null,
-    spend_limit_usdc: spend_limit_usdc || null,
-    webhookSecret,
-    default_webhook_url: default_webhook_url || null,
-    wallet_public_key: wallet_public_key || null,
-    dashboard_id: req.dashboard.id,
-  });
+    )
+    .run({
+      id,
+      keyHash,
+      keyPrefix,
+      label: label || null,
+      spend_limit_usdc: spend_limit_usdc || null,
+      webhookSecret,
+      default_webhook_url: default_webhook_url || null,
+      wallet_public_key: wallet_public_key || null,
+      dashboard_id: req.dashboard.id,
+    });
 
   // Mint a one-time claim code for the agent-facing onboarding flow.
   // The agent runs `npx obolus onboard --claim <code>` and the CLI
@@ -494,25 +513,27 @@ router.post('/api-keys', requirePermission('agent:create'), async (req, res) => 
   const sealedPayload = secretBox.seal(
     JSON.stringify({ api_key: rawKey, webhook_secret: webhookSecret }),
   );
-  db.prepare(
-    `
+  await db
+    .prepare(
+      `
     INSERT INTO agent_claims (id, code, api_key_id, sealed_payload, expires_at)
     VALUES (@id, @code, @api_key_id, @sealed_payload, @expires_at)
   `,
-  ).run({
-    id: claimId,
-    code: hashClaimCode(claimCode),
-    api_key_id: id,
-    sealed_payload: sealedPayload,
-    expires_at: claimExpiresAt,
-  });
+    )
+    .run({
+      id: claimId,
+      code: hashClaimCode(claimCode),
+      api_key_id: id,
+      sealed_payload: sealedPayload,
+      expires_at: claimExpiresAt,
+    });
 
   bizEvent('dashboard.key_created', {
     dashboard_id: req.dashboard.id,
     api_key_id: id,
     actor: req.user.email,
   });
-  recordAuditFromReq(req, 'agent.create', {
+  await recordAuditFromReq(req, 'agent.create', {
     resourceType: 'agent',
     resourceId: id,
     details: { label: label || null },
@@ -546,7 +567,7 @@ router.patch('/api-keys/:id', requirePermission('agent:update'), async (req, res
   // value being re-saved. Capturing the old row makes
   // post-incident reconstruction unambiguous.
   const owned = /** @type {any} */ (
-    db
+    await db
       .prepare(
         `SELECT id, enabled, spend_limit_usdc, default_webhook_url, label,
                 wallet_public_key, policy_daily_limit_usdc,
@@ -632,11 +653,13 @@ router.patch('/api-keys/:id', requirePermission('agent:update'), async (req, res
   const sets = Object.keys(fields)
     .map((k) => `${k} = @${k}`)
     .join(', ');
-  db.prepare(`UPDATE api_keys SET ${sets} WHERE id = @id AND dashboard_id = @dashboard_id`).run({
-    id: req.params.id,
-    dashboard_id: req.dashboard.id,
-    ...fields,
-  });
+  await db
+    .prepare(`UPDATE api_keys SET ${sets} WHERE id = @id AND dashboard_id = @dashboard_id`)
+    .run({
+      id: req.params.id,
+      dashboard_id: req.dashboard.id,
+      ...fields,
+    });
 
   // Include the previous values for every field that's actually
   // changing, so a post-incident forensics run can reconstruct the
@@ -645,7 +668,7 @@ router.patch('/api-keys/:id', requirePermission('agent:update'), async (req, res
   for (const k of Object.keys(fields)) {
     previous[k] = owned[k] ?? null;
   }
-  recordAuditFromReq(req, 'agent.update', {
+  await recordAuditFromReq(req, 'agent.update', {
     resourceType: 'agent',
     resourceId: req.params.id,
     details: { changes: fields, previous },
@@ -654,8 +677,8 @@ router.patch('/api-keys/:id', requirePermission('agent:update'), async (req, res
 });
 
 // DELETE /dashboard/api-keys/:id
-router.delete('/api-keys/:id', requirePermission('agent:delete'), (req, res) => {
-  const result = db
+router.delete('/api-keys/:id', requirePermission('agent:delete'), async (req, res) => {
+  const result = await db
     .prepare(`DELETE FROM api_keys WHERE id = ? AND dashboard_id = ?`)
     .run(req.params.id, req.dashboard.id);
   if (result.changes === 0) return res.status(404).json({ error: 'not_found' });
@@ -664,7 +687,7 @@ router.delete('/api-keys/:id', requirePermission('agent:delete'), (req, res) => 
     api_key_id: req.params.id,
     actor: req.user.email,
   });
-  recordAuditFromReq(req, 'agent.delete', {
+  await recordAuditFromReq(req, 'agent.delete', {
     resourceType: 'agent',
     resourceId: req.params.id,
   });
@@ -672,26 +695,26 @@ router.delete('/api-keys/:id', requirePermission('agent:delete'), (req, res) => 
 });
 
 // POST /dashboard/api-keys/:id/suspend
-router.post('/api-keys/:id/suspend', requirePermission('agent:suspend'), (req, res) => {
-  const result = db
+router.post('/api-keys/:id/suspend', requirePermission('agent:suspend'), async (req, res) => {
+  const result = await db
     .prepare(`UPDATE api_keys SET suspended = 1 WHERE id = ? AND dashboard_id = ?`)
     .run(req.params.id, req.dashboard.id);
   if (result.changes === 0) return res.status(404).json({ error: 'not_found' });
 
   const now = new Date().toISOString();
-  const pendingApprovals = db
+  const pendingApprovals = await db
     .prepare(`SELECT * FROM approval_requests WHERE api_key_id = ? AND status = 'pending'`)
     .all(req.params.id);
   for (const approval of pendingApprovals) {
-    db.prepare(
-      `UPDATE approval_requests SET status = 'rejected', decided_at = ?, decision_note = ? WHERE id = ?`,
-    ).run(now, 'Agent suspended', approval.id);
-    db.prepare(`UPDATE orders SET status = 'rejected', error = ?, updated_at = ? WHERE id = ?`).run(
-      'Agent suspended',
-      now,
-      approval.order_id,
-    );
-    recordDecision(
+    await db
+      .prepare(
+        `UPDATE approval_requests SET status = 'rejected', decided_at = ?, decision_note = ? WHERE id = ?`,
+      )
+      .run(now, 'Agent suspended', approval.id);
+    await db
+      .prepare(`UPDATE orders SET status = 'rejected', error = ?, updated_at = ? WHERE id = ?`)
+      .run('Agent suspended', now, approval.order_id);
+    await recordDecision(
       req.params.id,
       approval.order_id,
       approval.amount_usdc,
@@ -705,7 +728,7 @@ router.post('/api-keys/:id/suspend', requirePermission('agent:suspend'), (req, r
     api_key_id: req.params.id,
     actor: req.user.email,
   });
-  recordAuditFromReq(req, 'agent.suspend', {
+  await recordAuditFromReq(req, 'agent.suspend', {
     resourceType: 'agent',
     resourceId: req.params.id,
   });
@@ -713,8 +736,8 @@ router.post('/api-keys/:id/suspend', requirePermission('agent:suspend'), (req, r
 });
 
 // POST /dashboard/api-keys/:id/unsuspend
-router.post('/api-keys/:id/unsuspend', requirePermission('agent:suspend'), (req, res) => {
-  const result = db
+router.post('/api-keys/:id/unsuspend', requirePermission('agent:suspend'), async (req, res) => {
+  const result = await db
     .prepare(`UPDATE api_keys SET suspended = 0 WHERE id = ? AND dashboard_id = ?`)
     .run(req.params.id, req.dashboard.id);
   if (result.changes === 0) return res.status(404).json({ error: 'not_found' });
@@ -723,7 +746,7 @@ router.post('/api-keys/:id/unsuspend', requirePermission('agent:suspend'), (req,
     api_key_id: req.params.id,
     actor: req.user.email,
   });
-  recordAuditFromReq(req, 'agent.unsuspend', {
+  await recordAuditFromReq(req, 'agent.unsuspend', {
     resourceType: 'agent',
     resourceId: req.params.id,
   });
@@ -733,9 +756,9 @@ router.post('/api-keys/:id/unsuspend', requirePermission('agent:suspend'), (req,
 // ── Approval requests ─────────────────────────────────────────────────────────
 
 // GET /dashboard/approval-requests
-router.get('/approval-requests', requirePermission('approval:read'), (req, res) => {
+router.get('/approval-requests', requirePermission('approval:read'), async (req, res) => {
   const { status = 'pending', limit = 100 } = /** @type {Record<string, any>} */ (req.query);
-  const rows = db
+  const rows = await db
     .prepare(
       `
     SELECT ar.id, ar.api_key_id, ar.order_id, ar.amount_usdc, ar.agent_note,
@@ -757,7 +780,7 @@ router.post(
   '/approval-requests/:id/approve',
   requirePermission('approval:decide'),
   async (req, res) => {
-    const approval = db
+    const approval = await db
       .prepare(
         `
     SELECT ar.* FROM approval_requests ar
@@ -785,14 +808,14 @@ router.post(
     // approval lands. Re-run the same math here and bail with 403 if
     // the post-approval world would exceed the current limit.
     const freshKey = /** @type {any} */ (
-      db
+      await db
         .prepare(`SELECT spend_limit_usdc, total_spent_usdc FROM api_keys WHERE id = ?`)
         .get(approval.api_key_id)
     );
     if (freshKey?.spend_limit_usdc) {
       const settled = parseFloat(freshKey.total_spent_usdc || '0');
       const inFlightRow = /** @type {any} */ (
-        db
+        await db
           .prepare(
             `SELECT COALESCE(SUM(CAST(amount_usdc AS REAL)), 0) AS total
              FROM orders
@@ -855,8 +878,8 @@ router.post(
     // when the order has already drifted to a different state.
     let approvalResult;
     try {
-      approvalResult = db.transaction(() => {
-        const approvalChanged = db
+      approvalResult = await db.transaction(async () => {
+        const approvalChanged = await db
           .prepare(
             `UPDATE approval_requests
              SET status = 'approved', decided_at = ?, decided_by = ?, decision_note = ?
@@ -866,7 +889,7 @@ router.post(
         if (approvalChanged.changes === 0) {
           return { code: 410 };
         }
-        const orderChanged = db
+        const orderChanged = await db
           .prepare(
             `UPDATE orders
              SET status = 'pending_payment',
@@ -902,7 +925,7 @@ router.post(
           'Approval could not be finalised — it may have just expired or been decided by another operator.',
       });
     }
-    recordDecision(
+    await recordDecision(
       approval.api_key_id,
       approval.order_id,
       approval.amount_usdc,
@@ -911,8 +934,8 @@ router.post(
       decisionNote || 'Approved by dashboard owner',
     );
 
-    const order = db.prepare(`SELECT * FROM orders WHERE id = ?`).get(approval.order_id);
-    const keyRow = db
+    const order = await db.prepare(`SELECT * FROM orders WHERE id = ?`).get(approval.order_id);
+    const keyRow = await db
       .prepare(`SELECT webhook_secret, default_webhook_url FROM api_keys WHERE id = ?`)
       .get(approval.api_key_id);
     const webhookUrl = order?.webhook_url || keyRow?.default_webhook_url || null;
@@ -928,7 +951,7 @@ router.post(
         keyRow?.webhook_secret || null,
       ).catch(() => {});
     }
-    recordAuditFromReq(req, 'approval.approve', {
+    await recordAuditFromReq(req, 'approval.approve', {
       resourceType: 'approval',
       resourceId: req.params.id,
       details: {
@@ -942,73 +965,79 @@ router.post(
 );
 
 // POST /dashboard/approval-requests/:id/reject
-router.post('/approval-requests/:id/reject', requirePermission('approval:decide'), (req, res) => {
-  const approval = db
-    .prepare(
-      `
+router.post(
+  '/approval-requests/:id/reject',
+  requirePermission('approval:decide'),
+  async (req, res) => {
+    const approval = await db
+      .prepare(
+        `
     SELECT ar.* FROM approval_requests ar
     JOIN api_keys k ON ar.api_key_id = k.id
     WHERE ar.id = ? AND k.dashboard_id = ?
   `,
-    )
-    .get(req.params.id, req.dashboard.id);
-  if (!approval) return res.status(404).json({ error: 'not_found' });
-  if (approval.status !== 'pending')
-    return res.status(409).json({ error: 'already_decided', current_status: approval.status });
+      )
+      .get(req.params.id, req.dashboard.id);
+    if (!approval) return res.status(404).json({ error: 'not_found' });
+    if (approval.status !== 'pending')
+      return res.status(409).json({ error: 'already_decided', current_status: approval.status });
 
-  const now = new Date().toISOString();
-  const note = shortString(req.body.note, 1000) || 'Rejected';
-  // Atomic compare-and-swap: only flip 'pending' → 'rejected'. Guards
-  // against the expireApprovalRequests job racing us to 'expired'.
-  const approvalChanged = db
-    .prepare(
-      `UPDATE approval_requests
+    const now = new Date().toISOString();
+    const note = shortString(req.body.note, 1000) || 'Rejected';
+    // Atomic compare-and-swap: only flip 'pending' → 'rejected'. Guards
+    // against the expireApprovalRequests job racing us to 'expired'.
+    const approvalChanged = await db
+      .prepare(
+        `UPDATE approval_requests
        SET status = 'rejected', decided_at = ?, decided_by = ?, decision_note = ?
        WHERE id = ? AND status = 'pending'`,
-    )
-    .run(now, req.user.email, note, req.params.id);
-  if (approvalChanged.changes === 0) {
-    return res.status(409).json({
-      error: 'already_decided',
-      message: 'Approval could not be rejected — it may have just been decided or expired.',
-    });
-  }
-  db.prepare(
-    `UPDATE orders SET status = 'rejected', error = ?, updated_at = ?
+      )
+      .run(now, req.user.email, note, req.params.id);
+    if (approvalChanged.changes === 0) {
+      return res.status(409).json({
+        error: 'already_decided',
+        message: 'Approval could not be rejected — it may have just been decided or expired.',
+      });
+    }
+    await db
+      .prepare(
+        `UPDATE orders SET status = 'rejected', error = ?, updated_at = ?
      WHERE id = ? AND status = 'awaiting_approval'`,
-  ).run(note, now, approval.order_id);
-  recordDecision(
-    approval.api_key_id,
-    approval.order_id,
-    approval.amount_usdc,
-    'blocked',
-    'owner_rejected',
-    note,
-  );
-
-  const order = db.prepare(`SELECT * FROM orders WHERE id = ?`).get(approval.order_id);
-  const keyRow = db
-    .prepare(`SELECT webhook_secret, default_webhook_url FROM api_keys WHERE id = ?`)
-    .get(approval.api_key_id);
-  const webhookUrl = order?.webhook_url || keyRow?.default_webhook_url || null;
-  if (webhookUrl) {
-    enqueueWebhook(
-      webhookUrl,
-      { order_id: approval.order_id, status: 'rejected', phase: 'rejected', error: note },
-      keyRow?.webhook_secret || null,
-    ).catch(() => {});
-  }
-  recordAuditFromReq(req, 'approval.reject', {
-    resourceType: 'approval',
-    resourceId: req.params.id,
-    details: {
-      order_id: approval.order_id,
-      amount_usdc: approval.amount_usdc,
+      )
+      .run(note, now, approval.order_id);
+    await recordDecision(
+      approval.api_key_id,
+      approval.order_id,
+      approval.amount_usdc,
+      'blocked',
+      'owner_rejected',
       note,
-    },
-  });
-  res.json({ ok: true });
-});
+    );
+
+    const order = await db.prepare(`SELECT * FROM orders WHERE id = ?`).get(approval.order_id);
+    const keyRow = await db
+      .prepare(`SELECT webhook_secret, default_webhook_url FROM api_keys WHERE id = ?`)
+      .get(approval.api_key_id);
+    const webhookUrl = order?.webhook_url || keyRow?.default_webhook_url || null;
+    if (webhookUrl) {
+      enqueueWebhook(
+        webhookUrl,
+        { order_id: approval.order_id, status: 'rejected', phase: 'rejected', error: note },
+        keyRow?.webhook_secret || null,
+      ).catch(() => {});
+    }
+    await recordAuditFromReq(req, 'approval.reject', {
+      resourceType: 'approval',
+      resourceId: req.params.id,
+      details: {
+        order_id: approval.order_id,
+        amount_usdc: approval.amount_usdc,
+        note,
+      },
+    });
+    res.json({ ok: true });
+  },
+);
 
 // ── Alert rules ──────────────────────────────────────────────────────────────
 //
@@ -1019,20 +1048,20 @@ router.post('/approval-requests/:id/reject', requirePermission('approval:decide'
 // inside the evaluator (see lib/alerts.js).
 
 // GET /dashboard/alert-rules
-router.get('/alert-rules', requirePermission('alert:read'), (req, res) => {
+router.get('/alert-rules', requirePermission('alert:read'), async (req, res) => {
   const isPlatformOwner = !!req.user.is_platform_owner;
   // Seed defaults for this dashboard if it has none yet. The seed
   // function knows to skip system kinds for non-platform-owners.
-  alerts.seedDefaultRules(req.dashboard.id, { isPlatformOwner });
+  await alerts.seedDefaultRules(req.dashboard.id, { isPlatformOwner });
   res.json({
-    rules: alerts.listRules(req.dashboard.id, { isPlatformOwner }),
+    rules: await alerts.listRules(req.dashboard.id, { isPlatformOwner }),
     available_kinds: isPlatformOwner ? alerts.KNOWN_KINDS : alerts.USER_KINDS,
     is_platform_owner: isPlatformOwner,
   });
 });
 
 // POST /dashboard/alert-rules
-router.post('/alert-rules', requirePermission('alert:write'), (req, res) => {
+router.post('/alert-rules', requirePermission('alert:write'), async (req, res) => {
   const { name, kind, config, notify_email, notify_webhook_url } = req.body || {};
   if (!name || !kind) return res.status(400).json({ error: 'missing_fields' });
   // F2-alerts: route alert rule name through shortString so CRLF /
@@ -1048,7 +1077,7 @@ router.post('/alert-rules', requirePermission('alert:write'), (req, res) => {
     });
   }
   try {
-    const rule = alerts.createRule({
+    const rule = await alerts.createRule({
       dashboardId: req.dashboard.id,
       name: safeName,
       kind: String(kind),
@@ -1057,7 +1086,7 @@ router.post('/alert-rules', requirePermission('alert:write'), (req, res) => {
       notifyWebhookUrl: notify_webhook_url || null,
       isPlatformOwner: !!req.user.is_platform_owner,
     });
-    recordAuditFromReq(req, 'alert.create', {
+    await recordAuditFromReq(req, 'alert.create', {
       resourceType: 'alert_rule',
       resourceId: rule?.id,
       details: { kind, name },
@@ -1073,7 +1102,7 @@ router.post('/alert-rules', requirePermission('alert:write'), (req, res) => {
 });
 
 // PATCH /dashboard/alert-rules/:id
-router.patch('/alert-rules/:id', requirePermission('alert:write'), (req, res) => {
+router.patch('/alert-rules/:id', requirePermission('alert:write'), async (req, res) => {
   const { name, config, enabled, snoozedUntil, notify_email, notify_webhook_url } = req.body || {};
   // F2-alerts: same shortString sanitisation as POST. `undefined` means
   // "don't touch the name" (existing alerts.updateRule semantics).
@@ -1088,7 +1117,7 @@ router.patch('/alert-rules/:id', requirePermission('alert:write'), (req, res) =>
     }
   }
   try {
-    const rule = alerts.updateRule(
+    const rule = await alerts.updateRule(
       req.dashboard.id,
       req.params.id,
       {
@@ -1102,7 +1131,7 @@ router.patch('/alert-rules/:id', requirePermission('alert:write'), (req, res) =>
       { isPlatformOwner: !!req.user.is_platform_owner },
     );
     if (!rule) return res.status(404).json({ error: 'not_found' });
-    recordAuditFromReq(req, 'alert.update', {
+    await recordAuditFromReq(req, 'alert.update', {
       resourceType: 'alert_rule',
       resourceId: req.params.id,
       details: { name, enabled, snoozedUntil },
@@ -1118,13 +1147,13 @@ router.patch('/alert-rules/:id', requirePermission('alert:write'), (req, res) =>
 });
 
 // DELETE /dashboard/alert-rules/:id
-router.delete('/alert-rules/:id', requirePermission('alert:write'), (req, res) => {
+router.delete('/alert-rules/:id', requirePermission('alert:write'), async (req, res) => {
   try {
-    const ok = alerts.deleteRule(req.dashboard.id, req.params.id, {
+    const ok = await alerts.deleteRule(req.dashboard.id, req.params.id, {
       isPlatformOwner: !!req.user.is_platform_owner,
     });
     if (!ok) return res.status(404).json({ error: 'not_found' });
-    recordAuditFromReq(req, 'alert.delete', {
+    await recordAuditFromReq(req, 'alert.delete', {
       resourceType: 'alert_rule',
       resourceId: req.params.id,
     });
@@ -1139,9 +1168,9 @@ router.delete('/alert-rules/:id', requirePermission('alert:write'), (req, res) =
 });
 
 // GET /dashboard/alert-firings
-router.get('/alert-firings', requirePermission('alert:read'), (req, res) => {
+router.get('/alert-firings', requirePermission('alert:read'), async (req, res) => {
   const q = /** @type {Record<string, any>} */ (req.query);
-  const firings = alerts.listFirings(req.dashboard.id, {
+  const firings = await alerts.listFirings(req.dashboard.id, {
     limit: q.limit ? parseInt(q.limit, 10) : undefined,
     isPlatformOwner: !!req.user.is_platform_owner,
   });
@@ -1158,9 +1187,9 @@ router.get('/merchants', requirePermission('merchant:read'), (_req, res) => {
 // ── Webhook delivery log ─────────────────────────────────────────────────────
 
 // GET /dashboard/webhook-deliveries
-router.get('/webhook-deliveries', requirePermission('webhook:read'), (req, res) => {
+router.get('/webhook-deliveries', requirePermission('webhook:read'), async (req, res) => {
   const q = /** @type {Record<string, any>} */ (req.query);
-  const deliveries = webhookLog.listDeliveries(req.dashboard.id, {
+  const deliveries = await webhookLog.listDeliveries(req.dashboard.id, {
     limit: q.limit ? parseInt(q.limit, 10) : undefined,
     apiKeyId: q.api_key_id ? String(q.api_key_id) : undefined,
   });
@@ -1196,7 +1225,7 @@ router.post('/webhook-deliveries/test', requirePermission('webhook:test'), async
     await fireWebhookRaw(url, testPayload, webhook_secret || null, null, {
       dashboardId: req.dashboard.id,
     });
-    recordAuditFromReq(req, 'webhook.test', {
+    await recordAuditFromReq(req, 'webhook.test', {
       resourceType: 'webhook',
       details: { url },
     });
@@ -1212,9 +1241,9 @@ router.post('/webhook-deliveries/test', requirePermission('webhook:test'), async
 // ── Audit log ─────────────────────────────────────────────────────────────────
 
 // GET /dashboard/audit-log
-router.get('/audit-log', requirePermission('audit:read'), (req, res) => {
+router.get('/audit-log', requirePermission('audit:read'), async (req, res) => {
   const q = /** @type {Record<string, any>} */ (req.query);
-  const entries = listAudit(req.dashboard.id, {
+  const entries = await listAudit(req.dashboard.id, {
     limit: q.limit ? parseInt(q.limit, 10) : undefined,
     offset: q.offset ? parseInt(q.offset, 10) : undefined,
     action: q.action ? String(q.action) : undefined,
@@ -1226,7 +1255,7 @@ router.get('/audit-log', requirePermission('audit:read'), (req, res) => {
 // ── Policy audit log ──────────────────────────────────────────────────────────
 
 // GET /dashboard/policy-decisions
-router.get('/policy-decisions', requirePermission('audit:read'), (req, res) => {
+router.get('/policy-decisions', requirePermission('audit:read'), async (req, res) => {
   const { api_key_id, decision, limit = 200 } = /** @type {Record<string, any>} */ (req.query);
   let query = `
     SELECT pd.id, pd.api_key_id, pd.order_id, pd.decision, pd.rule, pd.reason,
@@ -1246,7 +1275,8 @@ router.get('/policy-decisions', requirePermission('audit:read'), (req, res) => {
   }
   query += ` ORDER BY pd.created_at DESC LIMIT ?`;
   params.push(/** @type {any} */ (Math.min(parseInt(String(limit)) || 200, 1000)));
-  res.json(db.prepare(query).all(...params));
+  const rows = await db.prepare(query).all(...params);
+  res.json(rows);
 });
 
 // GET /dashboard/platform-wallet — treasury wallet public key + network.

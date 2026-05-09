@@ -20,20 +20,20 @@ const BACKOFF_MS = 12000;
 
 // ── Cursor persistence ────────────────────────────────────────────────────────
 
-function loadLastSignature() {
+async function loadLastSignature() {
   const row = /** @type {any} */ (
-    db.prepare(`SELECT value FROM system_state WHERE key = 'solana_last_signature'`).get()
+    await db.prepare(`SELECT value FROM system_state WHERE key = 'solana_last_signature'`).get()
   );
   return row?.value || null;
 }
 
-function saveLastSignature(sig) {
-  db.prepare(
-    `INSERT OR REPLACE INTO system_state (key, value) VALUES ('solana_last_signature', ?)`,
-  ).run(sig);
-  db.prepare(
-    `INSERT OR REPLACE INTO system_state (key, value) VALUES ('solana_last_sig_at', ?)`,
-  ).run(new Date().toISOString());
+async function saveLastSignature(sig) {
+  await db
+    .prepare(`INSERT OR REPLACE INTO system_state (key, value) VALUES ('solana_last_signature', ?)`)
+    .run(sig);
+  await db
+    .prepare(`INSERT OR REPLACE INTO system_state (key, value) VALUES ('solana_last_sig_at', ?)`)
+    .run(new Date().toISOString());
 }
 
 // ── Event parsing from Anchor logs ───────────────────────────────────────────
@@ -58,14 +58,17 @@ function parsePaymentEvent(log) {
 
     // Skip 8-byte discriminator
     let offset = 8;
-    const orderIdBytes = buf.slice(offset, offset + 32); offset += 32;
-    const payerBytes  = buf.slice(offset, offset + 32); offset += 32;
-    const amount      = buf.readBigUInt64LE(offset);    offset += 8;
-    const assetByte   = buf[offset];
+    const orderIdBytes = buf.slice(offset, offset + 32);
+    offset += 32;
+    const payerBytes = buf.slice(offset, offset + 32);
+    offset += 32;
+    const amount = buf.readBigUInt64LE(offset);
+    offset += 8;
+    const assetByte = buf[offset];
 
     const orderId = orderIdBytes.toString('utf8').replace(/\0/g, '').trim();
-    const payer   = new PublicKey(payerBytes).toBase58();
-    const isUsdc  = assetByte === 0;
+    const payer = new PublicKey(payerBytes).toBase58();
+    const isUsdc = assetByte === 0;
 
     if (!orderId) return null;
 
@@ -74,8 +77,8 @@ function parsePaymentEvent(log) {
       payer,
       amount,
       paymentAsset: isUsdc ? 'usdc_solana' : 'sol_solana',
-      amountUsdc: isUsdc  ? (Number(amount) / 1_000_000).toFixed(6) : null,
-      amountSol:  !isUsdc ? (Number(amount) / 1_000_000_000).toFixed(9) : null,
+      amountUsdc: isUsdc ? (Number(amount) / 1_000_000).toFixed(6) : null,
+      amountSol: !isUsdc ? (Number(amount) / 1_000_000_000).toFixed(9) : null,
     };
   } catch {
     return null;
@@ -114,7 +117,7 @@ function startWatcher(onPayment) {
     if (shutdownRequested) return;
 
     try {
-      const lastSig = loadLastSignature();
+      const lastSig = await loadLastSignature();
       const opts = { limit: 50, commitment: /** @type {any} */ ('confirmed') };
       if (lastSig) opts.until = lastSig;
 
@@ -129,7 +132,7 @@ function startWatcher(onPayment) {
       for (const sigInfo of ordered) {
         if (shutdownRequested) break;
         if (sigInfo.err) {
-          saveLastSignature(sigInfo.signature);
+          await saveLastSignature(sigInfo.signature);
           continue;
         }
 
@@ -162,23 +165,27 @@ function startWatcher(onPayment) {
           }
         } catch (err) {
           try {
-            db.prepare(
-              `INSERT OR IGNORE INTO solana_dead_letter
+            await db
+              .prepare(
+                `INSERT OR IGNORE INTO solana_dead_letter
                  (tx_hash, ledger, raw_event, error, created_at)
                VALUES (?, ?, ?, ?, ?)`,
-            ).run(
-              sigInfo.signature,
-              sigInfo.slot,
-              JSON.stringify({ sig: sigInfo.signature }),
-              err?.message || String(err),
-              new Date().toISOString(),
-            );
-          } catch { /* best-effort */ }
+              )
+              .run(
+                sigInfo.signature,
+                sigInfo.slot,
+                JSON.stringify({ sig: sigInfo.signature }),
+                err?.message || String(err),
+                new Date().toISOString(),
+              );
+          } catch {
+            /* best-effort */
+          }
           bizEvent('solana.parse_error', { sig: sigInfo.signature, error: err?.message });
           console.error(`[solana] tx ${sigInfo.signature.slice(0, 16)}… error: ${err?.message}`);
         }
 
-        saveLastSignature(sigInfo.signature);
+        await saveLastSignature(sigInfo.signature);
       }
 
       schedule(POLL_MS);
@@ -194,9 +201,11 @@ function startWatcher(onPayment) {
     }
   }
 
-  db.prepare(
-    `INSERT OR REPLACE INTO system_state (key, value) VALUES ('solana_last_sig_at', ?)`,
-  ).run(new Date().toISOString());
+  db.prepare(`INSERT OR REPLACE INTO system_state (key, value) VALUES ('solana_last_sig_at', ?)`)
+    .run(new Date().toISOString())
+    .catch(() => {
+      /* best-effort startup heartbeat */
+    });
 
   poll();
   console.log(`[solana] watcher started — program ${programId} (${NETWORK})`);
