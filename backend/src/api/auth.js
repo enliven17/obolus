@@ -297,11 +297,17 @@ router.post('/privy', privyLimiter, async (req, res) => {
 
     // Ensure the token belongs to this app
     const aud = /** @type {any} */ (payload).aud;
-    const audOk = aud === privyAppId || (Array.isArray(aud) && aud.includes(privyAppId));
+    const appId = /** @type {any} */ (payload).app_id;
+    const audOk =
+      aud === privyAppId ||
+      (Array.isArray(aud) && aud.includes(privyAppId)) ||
+      appId === privyAppId;
     if (!audOk) {
-      return res.status(401).json({ error: 'invalid_privy_token' });
+      console.error('[auth/privy] aud/app_id mismatch:', { aud, appId, privyAppId });
+      return res.status(401).json({ error: 'invalid_privy_token_aud' });
     }
-  } catch {
+  } catch (err) {
+    console.error('[auth/privy] token verification failed:', err);
     return res.status(401).json({ error: 'invalid_privy_token' });
   }
 

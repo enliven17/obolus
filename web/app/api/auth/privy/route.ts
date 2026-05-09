@@ -3,7 +3,12 @@
 // Backend'e Privy user bilgisiyle oturum açar, HttpOnly session cookie set eder.
 
 import { NextResponse, type NextRequest } from 'next/server';
-import { getBackendBaseUrl } from '@/app/lib/admin-session';
+import {
+  ADMIN_SESSION_COOKIE,
+  SESSION_TTL_MS,
+  getBackendBaseUrl,
+  signSession,
+} from '@/app/lib/admin-session';
 
 export const runtime = 'nodejs';
 
@@ -38,15 +43,22 @@ export async function POST(req: NextRequest) {
 
   const data = await upstream.json().catch(() => ({}));
 
-  if (!upstream.ok) {
-    return NextResponse.json(data, { status: upstream.status });
+  if (!upstream.ok || !data.token) {
+    return NextResponse.json(
+      { error: data.error ?? 'privy_auth_failed', message: data.message },
+      { status: upstream.status || 401 },
+    );
   }
 
-  // Backend'den gelen Set-Cookie header'ını forward et
-  const res = NextResponse.json(data, { status: 200 });
-  const setCookie = upstream.headers.get('set-cookie');
-  if (setCookie) {
-    res.headers.set('set-cookie', setCookie);
-  }
+  // Create an HMAC-signed HttpOnly cookie for the session
+  const cookieValue = signSession(data.token);
+  const res = NextResponse.json({ user: data.user, dashboard: data.dashboard });
+  res.cookies.set(ADMIN_SESSION_COOKIE, cookieValue, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: SESSION_TTL_MS / 1000,
+    path: '/',
+  });
   return res;
 }
