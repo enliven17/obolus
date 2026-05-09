@@ -5,15 +5,15 @@ const { Router } = require('express');
 const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
-const { createRemoteJWKSet, jwtVerify } = require('jose');
+const { importSPKI, jwtVerify } = require('jose');
 const db = require('../db');
 const { sendLoginCode } = require('../lib/email');
 const { isPlatformOwner } = require('../lib/platform');
 const { recordAudit } = require('../lib/audit');
 
-// Cache the JWKS fetcher per app ID (created lazily on first privy login)
-/** @type {Map<string, ReturnType<typeof createRemoteJWKSet>>} */
-const _jwksCache = new Map();
+// Cache the parsed public key per app ID (created lazily on first privy login)
+/** @type {Map<string, import('jose').KeyLike | Uint8Array>} */
+const _publicKeyCache = new Map();
 
 const router = Router();
 
@@ -281,19 +281,29 @@ router.post('/privy', privyLimiter, async (req, res) => {
       .json({ error: 'privy_not_configured', message: 'Set PRIVY_APP_ID in backend .env' });
   }
 
-  // Verify the Privy access token locally via JWKS — no app secret needed,
-  // no outbound API call per request. The JWKS fetcher caches the key set.
   try {
-    if (!_jwksCache.has(privyAppId)) {
-      _jwksCache.set(
-        privyAppId,
-        createRemoteJWKSet(new URL(`https://auth.privy.io/api/v1/apps/${privyAppId}/jwks`)),
-      );
+    if (!_publicKeyCache.has(privyAppId)) {
+      const appRes = await fetch(`https://auth.privy.io/api/v1/apps/${privyAppId}`, {
+        headers: { 'privy-app-id': privyAppId },
+      });
+      if (!appRes.ok) {
+        throw new Error(`Failed to fetch Privy app settings: ${appRes.status}`);
+      }
+      const appData = await appRes.json();
+      if (!appData.verification_key) {
+        throw new Error('Privy app settings missing verification_key');
+      }
+      const publicKey = await importSPKI(appData.verification_key, 'ES256');
+      _publicKeyCache.set(privyAppId, publicKey);
     }
-    const jwks = /** @type {ReturnType<typeof createRemoteJWKSet>} */ (_jwksCache.get(privyAppId));
+
+    const publicKey = /** @type {import('jose').KeyLike | Uint8Array} */ (
+      _publicKeyCache.get(privyAppId)
+    );
+
     // Verify signature only — Privy's JWT claims format varies by SDK version.
     // Signature verification against Privy's JWKS is sufficient to trust the token.
-    const { payload } = await jwtVerify(accessToken, jwks);
+    const { payload } = await jwtVerify(accessToken, publicKey);
 
     // Ensure the token belongs to this app
     const aud = /** @type {any} */ (payload).aud;
