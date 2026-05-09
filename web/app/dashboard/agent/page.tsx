@@ -5,7 +5,7 @@ import { PageContainer } from '../_ui/PageContainer';
 import { PageHeader } from '../_ui/PageHeader';
 import { Card } from '../_ui/Card';
 
-const AGENT_URL = process.env.NEXT_PUBLIC_AGENT_URL || 'http://localhost:3002';
+const AGENT_ENDPOINT = '/api/agent/chat';
 
 interface AgentEvent {
   type: 'thinking' | 'tool_start' | 'tool_result' | 'tool_error' | 'text' | 'done' | 'error';
@@ -185,7 +185,6 @@ export default function AgentPage() {
   ]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const [sessionId] = useState(() => `session-${Date.now()}`);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -205,10 +204,15 @@ export default function AgentPage() {
       setLoading(true);
 
       try {
-        const res = await fetch(`${AGENT_URL}/chat/stream`, {
+        // Build history from current messages (exclude loading placeholders)
+        const history = messages
+          .filter((m) => !m.loading && m.content)
+          .map((m) => ({ role: m.role, content: m.content }));
+
+        const res = await fetch(AGENT_ENDPOINT, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: text, session_id: sessionId }),
+          body: JSON.stringify({ message: text, history }),
         });
 
         const reader = res.body!.getReader();
@@ -247,12 +251,12 @@ export default function AgentPage() {
             }
           }
         }
-      } catch (_err) {
+      } catch {
         setMessages((prev) => {
           const msgs = [...prev];
           msgs[msgs.length - 1] = {
             role: 'assistant',
-            content: 'Connection error. Is the agent service running on port 3002?',
+            content: 'Connection error. Please try again.',
             loading: false,
           };
           return msgs;
@@ -261,7 +265,7 @@ export default function AgentPage() {
         setLoading(false);
       }
     },
-    [loading, sessionId],
+    [loading, messages],
   );
 
   const handleSubmit = (e: React.FormEvent) => {

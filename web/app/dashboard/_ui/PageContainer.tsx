@@ -16,7 +16,9 @@ export function PageContainer({ children, maxWidth = 1400, gap = '1.25rem' }: Pr
     display: 'flex',
     flexDirection: 'column',
     gap: typeof gap === 'number' ? `${gap}px` : gap,
+    width: '100%',
     maxWidth,
+    boxSizing: 'border-box',
   };
   return (
     <div className="dashboard-page-container" style={style}>

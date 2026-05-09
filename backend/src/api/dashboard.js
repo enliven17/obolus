@@ -506,7 +506,7 @@ router.post('/api-keys', requirePermission('agent:create'), async (req, res) => 
   // constraint still works because both sides hash identically.
   const { hashClaimCode } = require('../lib/claim-hash');
   const claimId = uuidv4();
-  const claimCode = `c402_${crypto.randomBytes(24).toString('hex')}`;
+  const claimCode = `obk_${crypto.randomBytes(24).toString('hex')}`;
   const claimTtlMs = 10 * 60 * 1000; // 10 min — long enough to paste + run, short enough to matter
   const claimExpiresAt = new Date(Date.now() + claimTtlMs).toISOString();
   const secretBox = require('../lib/secret-box');

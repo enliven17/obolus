@@ -7,8 +7,8 @@ import { describe, it, expect } from 'vitest';
 import { _deriveDefaultWalletName } from './onboard';
 
 describe('deriveDefaultWalletName', () => {
-  const claimA = 'c402_a1b2c3d4e5f607080910111213141516171819202122232425262728293031';
-  const claimB = 'c402_ff00112233445566778899aabbccddeeff00112233445566778899aabbccdd';
+  const claimA = 'obk_a1b2c3d4e5f607080910111213141516171819202122232425262728293031';
+  const claimB = 'obk_ff00112233445566778899aabbccddeeff00112233445566778899aabbccdd';
 
   it('produces a name prefixed with obolus-', () => {
     expect(_deriveDefaultWalletName(claimA, 'research-bot')).toMatch(/^obolus-/);
@@ -38,9 +38,9 @@ describe('deriveDefaultWalletName', () => {
     );
   });
 
-  it('accepts a claim without the c402_ prefix', () => {
+  it('accepts a claim without the obk_ prefix', () => {
     const raw = _deriveDefaultWalletName(claimA, 'x');
-    const noPrefix = _deriveDefaultWalletName(claimA.replace(/^c402_/, ''), 'x');
+    const noPrefix = _deriveDefaultWalletName(claimA.replace(/^obk_/, ''), 'x');
     expect(raw).toBe(noPrefix);
   });
 

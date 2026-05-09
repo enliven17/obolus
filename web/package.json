@@ -13,18 +13,20 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.85.0",
     "@privy-io/react-auth": "^3.22.2",
     "geist": "^1.7.0",
+    "groq-sdk": "^0.9.1",
     "next": "16.2.4",
     "react": "19.2.5",
     "react-dom": "19.2.5"
   },
   "optionalDependencies": {
-    "@tailwindcss/oxide-win32-x64-msvc": "^4.2.2",
     "@tailwindcss/oxide-linux-x64-gnu": "^4.2.2",
-    "lightningcss-win32-x64-msvc": "^1.32.0",
+    "@tailwindcss/oxide-win32-x64-msvc": "^4.2.2",
     "lightningcss-darwin-arm64": "^1.32.0",
-    "lightningcss-linux-x64-gnu": "^1.32.0"
+    "lightningcss-linux-x64-gnu": "^1.32.0",
+    "lightningcss-win32-x64-msvc": "^1.32.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",

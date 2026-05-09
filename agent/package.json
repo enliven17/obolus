@@ -4,8 +4,8 @@
   "description": "Obolus AI agent — autonomous spending decisions via Groq/Anthropic",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "start": "node --env-file=.env src/index.js",
+    "dev": "node --env-file=.env --watch src/index.js"
   },
   "dependencies": {
     "express": "^4.21.2",

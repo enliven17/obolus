@@ -92,11 +92,11 @@ Options:
  * on disk.
  */
 function deriveDefaultWalletName(claim: string, label: string | null): string {
-  // Strip the `c402_` prefix (if present), take the first 8 hex chars
+  // Strip any `prefix_` part (e.g. `obk_`), take the first 8 hex chars
   // for a short-but-unique suffix. The claim code is cryptographically
   // random — 8 hex chars = 32 bits, collision probability negligible
   // at any realistic fleet size.
-  const raw = claim.replace(/^c402_/i, '');
+  const raw = claim.replace(/^[a-z0-9]+_/i, '');
   const suffix = raw.slice(0, 8).toLowerCase();
   // Slugify label: lowercase, replace non-alnum with -, collapse
   // repeats, trim hyphens, cap length. Falls back to `agent` if empty.
@@ -123,15 +123,15 @@ export async function onboardCommand(argv: string[]): Promise<number> {
 
   // Local format check — fail fast on obvious typos (missing prefix,
   // whitespace in the middle, truncated hex) before hitting the backend.
-  // Backend mint format is `c402_` + 48 hex chars (24 random bytes hex);
+  // Backend mint format is `obk_` + 48 hex chars (24 random bytes hex);
   // accept anything at least 16 hex chars after the prefix to stay
   // forward-compatible with future entropy bumps.
   const claim = args.claim.trim();
-  if (!/^c402_[a-f0-9]{16,}$/i.test(claim)) {
+  if (!/^[a-z0-9]+_[a-f0-9]{16,}$/i.test(claim)) {
     process.stderr.write(
       `error: '${claim.slice(0, 12)}…' does not look like a valid claim code.\n` +
-        'Expected format: c402_<hex>. Ask your operator to copy the code from\n' +
-        'the Agents tab of the dashboard — it is shown once and starts with c402_.\n',
+        'Expected format: obk_<hex>. Ask your operator to copy the code from\n' +
+        'the Agents tab of the dashboard — it is shown once and starts with obk_.\n',
     );
     return 2;
   }
@@ -385,7 +385,9 @@ export async function onboardCommand(argv: string[]): Promise<number> {
       // paid in USDC by the operator, they need a token account first.
       // Call this out explicitly — without it, any USDC payment sent
       // to the address bounces.
-      process.stdout.write('  To receive USDC from the operator, open the USDC token account first:\n');
+      process.stdout.write(
+        '  To receive USDC from the operator, open the USDC token account first:\n',
+      );
       process.stdout.write('    npx -y obolus@latest wallet token account\n');
       process.stdout.write('\n');
     }
