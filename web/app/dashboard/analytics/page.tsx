@@ -9,7 +9,7 @@ import { useDashboard } from '../_lib/DashboardProvider';
 import { Card } from '../_ui/Card';
 import { KpiRow, KpiTile } from '../_ui/KpiTile';
 import { SpendChart } from '../_ui/SpendChart';
-import { Solana RPCtalBar } from '../_ui/Solana RPCtalBar';
+import { HorizontalBar } from '../_ui/HorizontalBar';
 import { FilterChip } from '../_ui/FilterChip';
 import { PageContainer } from '../_ui/PageContainer';
 import { PageHeader } from '../_ui/PageHeader';
@@ -127,7 +127,7 @@ export default function AnalyticsPage() {
               <SpendChart data={chartData} height={220} />
             </Card>
             <Card title="Latency distribution">
-              <Solana RPCtalBar
+              <HorizontalBar
                 rows={latency.buckets.map((b) => ({
                   label: b.range,
                   value: b.count,
@@ -155,7 +155,7 @@ export default function AnalyticsPage() {
             }}
           >
             <Card title="Spend by agent">
-              <Solana RPCtalBar
+              <HorizontalBar
                 rows={agentSpend.slice(0, 10).map((a) => ({
                   label: a.label,
                   value: a.amount,
@@ -167,7 +167,7 @@ export default function AnalyticsPage() {
               {errors.length === 0 ? (
                 <EmptyState title="No failures in this window" />
               ) : (
-                <Solana RPCtalBar
+                <HorizontalBar
                   rows={errors.map((e) => ({
                     label: e.reason,
                     value: e.count,

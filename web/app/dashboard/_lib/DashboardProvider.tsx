@@ -55,7 +55,7 @@ export function useDashboard(): DashboardState {
   return ctx;
 }
 
-interface Solana RPCBalanceResponse {
+interface SolanaRpcBalanceResponse {
   balances: Array<{
     asset_type: string;
     asset_code?: string;
@@ -64,7 +64,7 @@ interface Solana RPCBalanceResponse {
   }>;
 }
 
-async function fetchSolana RPCBalance(publicKey: string, network?: string): Promise<WalletBalance> {
+async function fetchSolanaRpcBalance(publicKey: string, network?: string): Promise<WalletBalance> {
   try {
     const horizonUrl =
       network === 'testnet' ? 'https://horizon-testnet.solana.org' : 'https://horizon.solana.org';
@@ -74,7 +74,7 @@ async function fetchSolana RPCBalance(publicKey: string, network?: string): Prom
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) return { sol: '0', usdc: '0' };
-    const data: Solana RPCBalanceResponse = await res.json();
+    const data: SolanaRpcBalanceResponse = await res.json();
     let sol = '0';
     let usdc = '0';
     for (const b of data.balances || []) {
@@ -236,7 +236,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     async function pollAll() {
       const entries = await Promise.all(
         agentsWithWallets.map(async (a) => {
-          const bal = await fetchSolana RPCBalance(a.wallet_public_key!, info?.network);
+          const bal = await fetchSolanaRpcBalance(a.wallet_public_key!, info?.network);
           return [a.id, bal] as const;
         }),
       );
