@@ -29,10 +29,14 @@ async function loadLastSignature() {
 
 async function saveLastSignature(sig) {
   await db
-    .prepare(`INSERT OR REPLACE INTO system_state (key, value) VALUES ('solana_last_signature', ?)`)
+    .prepare(
+      `INSERT INTO system_state (key, value) VALUES ('solana_last_signature', ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+    )
     .run(sig);
   await db
-    .prepare(`INSERT OR REPLACE INTO system_state (key, value) VALUES ('solana_last_sig_at', ?)`)
+    .prepare(
+      `INSERT INTO system_state (key, value) VALUES ('solana_last_sig_at', ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+    )
     .run(new Date().toISOString());
 }
 
@@ -167,9 +171,9 @@ function startWatcher(onPayment) {
           try {
             await db
               .prepare(
-                `INSERT OR IGNORE INTO solana_dead_letter
+                `INSERT INTO solana_dead_letter
                  (tx_hash, ledger, raw_event, error, created_at)
-               VALUES (?, ?, ?, ?, ?)`,
+               VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
               )
               .run(
                 sigInfo.signature,
@@ -201,7 +205,9 @@ function startWatcher(onPayment) {
     }
   }
 
-  db.prepare(`INSERT OR REPLACE INTO system_state (key, value) VALUES ('solana_last_sig_at', ?)`)
+  db.prepare(
+    `INSERT INTO system_state (key, value) VALUES ('solana_last_sig_at', ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+  )
     .run(new Date().toISOString())
     .catch(() => {
       /* best-effort startup heartbeat */

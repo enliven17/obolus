@@ -201,7 +201,9 @@ async function getVccToken() {
     throw new Error('VCC registration response missing token field');
   }
   await db
-    .prepare(`INSERT OR REPLACE INTO system_state (key, value) VALUES ('vcc_token', ?)`)
+    .prepare(
+      `INSERT INTO system_state (key, value) VALUES ('vcc_token', ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+    )
     .run(encryptToken(body.token));
   bizEvent('vcc.registered', { label });
   return body.token;

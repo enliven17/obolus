@@ -91,16 +91,23 @@ function normaliseSql(sql) {
     sql
       // datetime('now') → NOW()
       .replace(/\bdatetime\('now'\)/gi, 'NOW()')
-      // datetime('now', '+N units') → NOW() + INTERVAL 'N units'
+      // datetime('now', 'modifier') → NOW() + INTERVAL 'modifier'
       .replace(/\bdatetime\('now',\s*'([^']+)'\)/gi, (_, mod) => `(NOW() + INTERVAL '${mod}')`)
+      // datetime('now', ?) → NOW() + ?::interval  (parameterized modifier)
+      .replace(/\bdatetime\('now',\s*\?/gi, '(NOW() + ?::interval')
+      // datetime(col_or_param) — any non-literal arg → cast to timestamptz
+      // Matches datetime(col), datetime(?), but NOT datetime('now'...) (already handled above)
+      .replace(/\bdatetime\(([^')](?:[^)])*)\)/gi, '($1)::timestamptz')
       // date('now') → CURRENT_DATE
       .replace(/\bdate\('now'\)/gi, 'CURRENT_DATE')
-      // date(col) → col::date  (SQLite date() → PG cast)
+      // date(col) → col::date
       .replace(/\bdate\(([^)]+)\)/gi, '($1)::date')
       // strftime('%H:%M', 'now') → TO_CHAR(NOW(), 'HH24:MI')
       .replace(/\bstrftime\s*\(\s*'%H:%M'\s*,\s*'now'\s*\)/gi, "TO_CHAR(NOW(), 'HH24:MI')")
-      // INSERT OR IGNORE → INSERT ... ON CONFLICT DO NOTHING (handled at exec level)
+      // INSERT OR IGNORE INTO → INSERT INTO ... needs ON CONFLICT DO NOTHING at end (added per-query)
       .replace(/\bINSERT\s+OR\s+IGNORE\s+INTO\b/gi, 'INSERT INTO')
+      // INSERT OR REPLACE INTO → INSERT INTO ... ON CONFLICT DO UPDATE (upsert; column-specific handling per query)
+      .replace(/\bINSERT\s+OR\s+REPLACE\s+INTO\b/gi, 'INSERT INTO')
       // CAST(x AS REAL) → CAST(x AS DOUBLE PRECISION)
       .replace(/\bCAST\s*\(([^)]+)\s+AS\s+REAL\)/gi, 'CAST($1 AS DOUBLE PRECISION)')
       // printf('%.2f', expr) → ROUND((expr)::numeric, 2)::text

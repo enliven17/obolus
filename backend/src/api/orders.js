@@ -546,9 +546,9 @@ router.post('/', orderCreateLimiter, async (req, res) => {
       if (idempotencyKey) {
         await db
           .prepare(
-            `INSERT OR IGNORE INTO idempotency_keys
+            `INSERT INTO idempotency_keys
            (key, api_key_id, request_fingerprint, response_status, response_body)
-           VALUES (?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
           )
           .run(
             idempotencyKey,
@@ -608,9 +608,9 @@ router.post('/', orderCreateLimiter, async (req, res) => {
       if (idempotencyKey) {
         await db
           .prepare(
-            `INSERT OR IGNORE INTO idempotency_keys
+            `INSERT INTO idempotency_keys
            (key, api_key_id, request_fingerprint, response_status, response_body)
-           VALUES (?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
           )
           .run(idempotencyKey, req.apiKey.id, requestFingerprint, 201, JSON.stringify(sandboxBody));
       }
@@ -651,9 +651,9 @@ router.post('/', orderCreateLimiter, async (req, res) => {
     if (idempotencyKey) {
       await db
         .prepare(
-          `INSERT OR IGNORE INTO idempotency_keys
+          `INSERT INTO idempotency_keys
          (key, api_key_id, request_fingerprint, response_status, response_body)
-         VALUES (?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
         )
         .run(idempotencyKey, req.apiKey.id, requestFingerprint, 201, JSON.stringify(responseBody));
     }
@@ -1141,7 +1141,7 @@ async function checkSpendAlert(apiKeyId, newAmount) {
           .get(alertKey);
         if (!already) {
           await db
-            .prepare(`INSERT OR IGNORE INTO system_state (key, value) VALUES (?, '1')`)
+            .prepare(`INSERT INTO system_state (key, value) VALUES (?, '1') ON CONFLICT DO NOTHING`)
             .run(alertKey);
           sendSpendAlertEmail(ownerRow.email, {
             keyLabel: label,
@@ -1183,7 +1183,7 @@ async function checkSpendAlert(apiKeyId, newAmount) {
           .get(alertKey);
         if (!already) {
           await db
-            .prepare(`INSERT OR IGNORE INTO system_state (key, value) VALUES (?, '1')`)
+            .prepare(`INSERT INTO system_state (key, value) VALUES (?, '1') ON CONFLICT DO NOTHING`)
             .run(alertKey);
           sendSpendAlertEmail(ownerRow.email, {
             keyLabel: label,
