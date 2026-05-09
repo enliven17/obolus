@@ -156,7 +156,9 @@ async function* runAgent(
       try {
         res = await groq.chat.completions.create({
           model,
-          messages: messages as Parameters<typeof groq.chat.completions.create>[0]['messages'],
+          messages: messages as unknown as Parameters<
+            typeof groq.chat.completions.create
+          >[0]['messages'],
           tools: TOOL_DEFINITIONS,
           tool_choice: 'auto',
           max_tokens: 1024,
