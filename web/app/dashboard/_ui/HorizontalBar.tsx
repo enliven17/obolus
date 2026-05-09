@@ -1,4 +1,4 @@
-// Solana RPCtal bar chart — used by analytics for spend-by-agent and the
+// Horizontal bar chart — used by analytics for spend-by-agent and the
 // error breakdown. Pure SVG so it inherits the theme.
 
 import type { ReactNode } from 'react';
@@ -15,7 +15,7 @@ interface Props {
   height?: number;
 }
 
-export function Solana RPCtalBar({ rows, max, height = 14 }: Props) {
+export function HorizontalBar({ rows, max, height = 14 }: Props) {
   const maxValue = max ?? Math.max(...rows.map((r) => r.value), 1);
   if (rows.length === 0) {
     return (
