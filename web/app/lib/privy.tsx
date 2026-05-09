@@ -19,8 +19,8 @@ export function ObolusPrivyProvider({ children }: { children: ReactNode }) {
         },
         loginMethods: ['email', 'google', 'twitter', 'wallet'],
         embeddedWallets: {
-          createOnLogin: 'users-without-wallets',
-          requireUserPasswordOnCreate: false,
+          ethereum: { createOnLogin: 'users-without-wallets' },
+          solana: { createOnLogin: 'users-without-wallets' },
         },
       }}
     >

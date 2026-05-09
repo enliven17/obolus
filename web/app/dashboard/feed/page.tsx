@@ -52,7 +52,7 @@ export default function FeedPage() {
         card_brand: o.card_brand ?? undefined,
         solana_txid: o.solana_txid ?? undefined,
         completed_at: o.updated_at || o.created_at,
-        metadata: o.metadata,
+        metadata: o.metadata ? { service_id: o.metadata.service_id } : undefined,
       }))
       .sort((a, b) => new Date(b.completed_at).getTime() - new Date(a.completed_at).getTime());
     setFeed(delivered);
