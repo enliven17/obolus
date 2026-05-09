@@ -5,10 +5,15 @@ const { Router } = require('express');
 const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
+const { createRemoteJWKSet, jwtVerify } = require('jose');
 const db = require('../db');
 const { sendLoginCode } = require('../lib/email');
 const { isPlatformOwner } = require('../lib/platform');
 const { recordAudit } = require('../lib/audit');
+
+// Cache the JWKS fetcher per app ID (created lazily on first privy login)
+/** @type {Map<string, ReturnType<typeof createRemoteJWKSet>>} */
+const _jwksCache = new Map();
 
 const router = Router();
 
@@ -269,44 +274,40 @@ router.post('/privy', privyLimiter, async (req, res) => {
   const addr = normalizeEmail(email);
 
   const privyAppId = process.env.PRIVY_APP_ID;
-  const privyAppSecret = process.env.PRIVY_APP_SECRET;
 
-  if (privyAppId) {
-    try {
-      const headers = /** @type {Record<string,string>} */ ({
-        Authorization: `Bearer ${accessToken}`,
-        'privy-app-id': privyAppId,
-      });
-      if (privyAppSecret) {
-        const credentials = Buffer.from(`${privyAppId}:${privyAppSecret}`).toString('base64');
-        headers['Authorization'] = `Basic ${credentials}`;
-        headers['privy-access-token'] = accessToken;
-      }
-      const verify = await fetch('https://auth.privy.io/api/v1/users/me', {
-        headers,
-        signal: AbortSignal.timeout(8000),
-      });
-      if (!verify.ok) {
-        console.warn(`[auth/privy] token verify failed: HTTP ${verify.status} for ${addr}`);
-        return res.status(401).json({ error: 'invalid_privy_token' });
-      }
-      const privyUser = await verify.json();
-      const linkedEmail =
-        privyUser?.email?.address ||
-        privyUser?.linked_accounts?.find((/** @type {any} */ a) => a.type === 'email')?.address;
-      if (linkedEmail && normalizeEmail(linkedEmail) !== addr) {
-        console.warn(`[auth/privy] email mismatch: claimed=${addr}, privy=${linkedEmail}`);
-        return res.status(401).json({ error: 'email_mismatch' });
-      }
-      console.log(`[auth/privy] token verified for ${addr}`);
-    } catch (err) {
-      console.error('[auth/privy] verify failed:', err.message);
-      return res.status(502).json({ error: 'privy_verify_failed' });
-    }
-  } else {
+  if (!privyAppId) {
     return res
       .status(503)
       .json({ error: 'privy_not_configured', message: 'Set PRIVY_APP_ID in backend .env' });
+  }
+
+  // Verify the Privy access token locally via JWKS — no app secret needed,
+  // no outbound API call per request. The JWKS fetcher caches the key set.
+  try {
+    if (!_jwksCache.has(privyAppId)) {
+      _jwksCache.set(
+        privyAppId,
+        createRemoteJWKSet(new URL(`https://auth.privy.io/api/v1/apps/${privyAppId}/jwks`)),
+      );
+    }
+    const jwks = /** @type {ReturnType<typeof createRemoteJWKSet>} */ (_jwksCache.get(privyAppId));
+    const { payload } = await jwtVerify(accessToken, jwks, {
+      issuer: 'privy.io',
+      audience: privyAppId,
+    });
+
+    // Check claimed email matches the token's linked accounts
+    const sub = /** @type {any} */ (payload);
+    const linkedEmail =
+      sub?.email?.address ||
+      (Array.isArray(sub?.linked_accounts)
+        ? sub.linked_accounts.find((/** @type {any} */ a) => a.type === 'email')?.address
+        : undefined);
+    if (linkedEmail && normalizeEmail(linkedEmail) !== addr) {
+      return res.status(401).json({ error: 'email_mismatch' });
+    }
+  } catch {
+    return res.status(401).json({ error: 'invalid_privy_token' });
   }
 
   const now = new Date().toISOString();
