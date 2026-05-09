@@ -1,9 +1,6 @@
 {
   "framework": "nextjs",
-  "buildCommand": "cd .. && npm run build -w web",
-  "installCommand": "cd .. && npm install",
-  "outputDirectory": ".next",
-  "env": {
-    "NEXT_PUBLIC_PRIVY_APP_ID": "@next_public_privy_app_id"
-  }
+  "buildCommand": "npm run build",
+  "installCommand": "npm install",
+  "outputDirectory": ".next"
 }
